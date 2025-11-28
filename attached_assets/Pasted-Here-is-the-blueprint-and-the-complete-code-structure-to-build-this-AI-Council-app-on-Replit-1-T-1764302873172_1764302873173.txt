@@ -1,0 +1,181 @@
+Here is the blueprint and the complete code structure to build this "AI Council" app on Replit.
+1. The Schematic
+This logic flows in a loop. We use Streamlit for the UI because it handles the "step-by-step" visualization perfectly without complex frontend code.
+The Data Flow:
+ * User Input \rightarrow triggers 3 parallel Workers.
+ * Workers (x3) \rightarrow Each generates a draft based on a unique "personality" (Analyst, Creative, Skeptic).
+ * The Judge \rightarrow Reads all 3 drafts. It does not just pick one. It synthesizes a "Best Consensus" and lists specific "Critiques" for improvement.
+ * Refinement Loop \rightarrow The Judge's critique is fed back to the Workers. They rewrite their answers.
+ * Stop Condition \rightarrow After N rounds (or if the Judge says "PERFECT"), the final result is displayed.
+2. File Structure for Replit
+Create these two files in your Replit project.
+A. requirements.txt
+(Replit will install these automatically when you run)
+streamlit
+openai
+
+B. main.py
+(Copy this entire block. It acts as both the backend logic and the frontend UI).
+import streamlit as st
+from openai import OpenAI
+import os
+import json
+
+# --- CONFIGURATION ---
+# In Replit, set your API key in "Secrets" (padlock icon) with key: OPENAI_API_KEY
+# You can switch this to use Groq, Anthropic, or others by changing the base_url/client.
+client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+
+MAX_ROUNDS = 2  # Keep this low to save money/time
+MODEL_WORKER = "gpt-4o-mini" # Fast/Cheap model for workers
+MODEL_JUDGE = "gpt-4o"       # Smart model for the Judge
+
+# --- WORKER PERSONAS ---
+workers = {
+    "Worker A": "You are a SKEPTICAL analyst. Look for facts and logical inconsistencies.",
+    "Worker B": "You are a CREATIVE thinker. Look for novel solutions and out-of-the-box ideas.",
+    "Worker C": "You are a PRAGMATIC realist. Focus on what is actionable and efficient."
+}
+
+# --- BACKEND FUNCTIONS ---
+
+def get_agent_response(system_prompt, user_query, previous_feedback=None):
+    """
+    Simulates a worker thinking. If there is feedback, it appends it to the prompt.
+    """
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_query}
+    ]
+    
+    if previous_feedback:
+        messages.append({"role": "user", "content": f"CRITICAL FEEDBACK FROM JUDGE: {previous_feedback}. Please refine your answer based on this."})
+
+    response = client.chat.completions.create(
+        model=MODEL_WORKER,
+        messages=messages,
+        temperature=0.7
+    )
+    return response.choices[0].message.content
+
+def judge_responses(query, answers):
+    """
+    The Judge evaluates all 3 answers and outputs JSON with a critique and a score.
+    """
+    combined_answers = "\n\n".join([f"--- {name} ---\n{ans}" for name, ans in answers.items()])
+    
+    judge_prompt = f"""
+    You are the Chief Editor. You have received three drafts answering the user's query: "{query}".
+    
+    Drafts:
+    {combined_answers}
+    
+    Your goal is to reach consensus.
+    1. Synthesize the best parts of all three into a summary.
+    2. Provide specific critique on what is missing or conflicting.
+    3. Rate the current quality (0-100).
+    
+    Return ONLY valid JSON in this format:
+    {{
+        "synthesis": "The summary of the best points...",
+        "critique": "Instructions for the workers on how to improve...",
+        "score": 85,
+        "stop": boolean (true if score > 90)
+    }}
+    """
+    
+    response = client.chat.completions.create(
+        model=MODEL_JUDGE,
+        messages=[{"role": "user", "content": judge_prompt}],
+        response_format={"type": "json_object"}
+    )
+    
+    return json.loads(response.choices[0].message.content)
+
+# --- FRONTEND UI (STREAMLIT) ---
+
+st.set_page_config(page_title="AI Consensus Council", layout="wide")
+st.title("🏛️ AI Consensus Council")
+st.caption("Three AI agents debate your query, a Judge refines it.")
+
+# Session State for history
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+
+# Display Chat History
+for message in st.session_state.messages:
+    with st.chat_message(message["role"]):
+        st.markdown(message["content"])
+
+# Input Logic
+query = st.chat_input("Enter your complex query here...")
+
+if query:
+    # 1. User Message
+    st.session_state.messages.append({"role": "user", "content": query})
+    with st.chat_message("user"):
+        st.markdown(query)
+
+    # 2. The Process Loop
+    current_feedback = None
+    final_synthesis = ""
+    
+    status_container = st.status("The Council is convening...", expanded=True)
+    
+    try:
+        for round_num in range(1, MAX_ROUNDS + 1):
+            status_container.write(f"**🔄 Round {round_num}/{MAX_ROUNDS}**")
+            
+            # Step A: Workers Generate (Parallel-ish)
+            current_answers = {}
+            cols = status_container.columns(3)
+            
+            for idx, (name, persona) in enumerate(workers.items()):
+                with cols[idx]:
+                    st.write(f"*{name} is thinking...*")
+                    # In a real production app, you would use asyncio here for true parallelism
+                    ans = get_agent_response(persona, query, current_feedback)
+                    current_answers[name] = ans
+                    with st.expander(f"See {name}'s Draft"):
+                        st.markdown(ans)
+            
+            # Step B: Judge Evaluates
+            status_container.write("👨‍⚖️ **Judge is deliberating...**")
+            evaluation = judge_responses(query, current_answers)
+            
+            current_feedback = evaluation['critique']
+            final_synthesis = evaluation['synthesis']
+            score = evaluation['score']
+            
+            status_container.info(f"Judge's Critique: {current_feedback}")
+            status_container.metric(label="Consensus Score", value=f"{score}/100")
+            
+            if evaluation['stop'] or score >= 90:
+                status_container.success("Consensus Reached! Stopping early.")
+                break
+                
+        status_container.update(label="Council Adjourned", state="complete", expanded=False)
+
+        # 3. Final Output
+        with st.chat_message("assistant"):
+            st.markdown("### 🏆 Final Consensus Answer")
+            st.markdown(final_synthesis)
+            st.markdown("---")
+            st.caption(f"Refined over {round_num} rounds.")
+            
+        st.session_state.messages.append({"role": "assistant", "content": final_synthesis})
+
+    except Exception as e:
+        st.error(f"An error occurred: {e}")
+
+3. How to Run This
+ * Paste the Code: Put the code above into main.py on Replit.
+ * Set the API Key: Go to the "Secrets" tab (padlock icon) on the left sidebar.
+   * Key: OPENAI_API_KEY
+   * Value: sk-proj-.... (your actual key).
+ * Run: Click the big green "Run" button. Replit will install the libraries and open a web view.
+Why this setup works for you:
+ * Visual Debugging: The st.status and st.expander blocks let you see exactly what the workers are disagreeing on without cluttering the final screen.
+ * Modular Personas: You can easily change the dictionary workers = {...} to be "Historian", "Scientist", "Ethicist" if you want to change the "lens" of the debate.
+Action Item
+Would you like me to modify the workers dictionary to include a "Project Manager" persona specifically to help you balance your jobs and home life?

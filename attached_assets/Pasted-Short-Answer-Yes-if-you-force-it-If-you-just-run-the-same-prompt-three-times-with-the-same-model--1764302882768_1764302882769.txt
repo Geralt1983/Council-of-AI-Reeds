@@ -1,0 +1,30 @@
+Short Answer: Yes, if you force it.
+If you just run the same prompt three times with the same model, you will get mostly identical answers. However, you can "trick" a single LLM into having a split personality using three specific levers.
+Here is how to ensure diversity without paying for three different API subscriptions:
+1. The "Persona" Lever (Most Effective)
+You must drastically change the System Prompt for each worker. The underlying model (e.g., GPT-4o-mini) is huge; it contains many "sub-personalities."
+ * Worker A (The Optimist): "You are a Silicon Valley VC. You only see potential, upside, and growth. Ignore risks."
+ * Worker B (The Pessimist): "You are a risk-management auditor. You only see failure points, bugs, and edge cases. Be harsh."
+ * Worker C (The Historian): "You are an academic. You only care about precedent and what has been done before."
+Result: Even though it's the same brain, the output will be radically different.
+2. The "Temperature" Lever (The Chaos Knob)
+In the code I gave you, look at the temperature setting in the get_agent_response function.
+ * Low Temp (0.1): Deterministic, boring, factual.
+ * High Temp (0.8 - 1.0): Creative, random, diverse.
+ * Strategy: Crank the temperature up to 0.9 for the Workers to force variety, but keep the Judge at 0.2 so it remains logical and consistent.
+3. The "True Diversity" Upgrade (Harder)
+If you find the answers are still too similar, the next step is using different families of models. Different training data = different biases.
+ * Worker A: GPT-4o (OpenAI)
+ * Worker B: Claude 3.5 Sonnet (Anthropic)
+ * Worker C: Llama 3 (Meta/Groq)
+Note: This complicates your code because you need 3 different API keys and SDK setups.
+Code Tweak for Diversity
+In the main.py I gave you, find the get_agent_response function and change the temperature to 0.9:
+    response = client.chat.completions.create(
+        model=MODEL_WORKER,
+        messages=messages,
+        temperature=0.9 # Changed from 0.7 to 0.9 for higher variance
+    )
+
+Action Item
+Would you like me to provide 3 distinct "Persona Prompts" tailored to a specific topic (like managing your schedule or coding) to test if the diversity is high enough?
