@@ -1,11 +1,12 @@
 import { useState } from "react";
-import { useCouncilSimulation, WORKERS } from "@/lib/simulation";
+import { useCouncilSimulation, WORKERS } from "@/lib/useCouncil";
 import { WorkerCard } from "@/components/council/worker-card";
 import { JudgePanel } from "@/components/council/judge-panel";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { motion, AnimatePresence } from "framer-motion";
-import { Sparkles, SendHorizontal, BrainCircuit } from "lucide-react";
+import { Sparkles, SendHorizontal, BrainCircuit, AlertCircle } from "lucide-react";
+import { Alert, AlertDescription } from "@/components/ui/alert";
 
 export default function CouncilPage() {
   const { 
@@ -15,7 +16,8 @@ export default function CouncilPage() {
     drafts, 
     critique, 
     score, 
-    consensus, 
+    consensus,
+    error,
     startSimulation 
   } = useCouncilSimulation();
 
@@ -60,6 +62,13 @@ export default function CouncilPage() {
             Three distinct AI personas debate your query. <br className="hidden md:block"/>
             A Judge synthesizes the truth.
           </motion.p>
+
+          {error && (
+            <Alert variant="destructive" className="max-w-2xl mx-auto">
+              <AlertCircle className="h-4 w-4" />
+              <AlertDescription>{error}</AlertDescription>
+            </Alert>
+          )}
 
           <motion.form 
             initial={{ opacity: 0, y: 20 }}
