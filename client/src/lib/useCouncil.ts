@@ -1,6 +1,6 @@
-import { useState, useEffect, useCallback } from "react";
-import { createSession, generateWorkerDrafts, judgeSession } from "./api";
-import type { Session, Draft, Evaluation } from "@shared/schema";
+import { useState, useCallback } from "react";
+import { useMutation } from "@tanstack/react-query";
+import { useToast } from "@/hooks/use-toast";
 
 export type SimulationState = "idle" | "thinking" | "judging" | "consensus";
 
@@ -43,91 +43,85 @@ export const WORKERS: Worker[] = [
 export interface DraftDisplay {
   workerId: string;
   content: string;
-  status: "pending" | "streaming" | "complete";
+  status: "pending" | "complete";
+}
+
+interface RoundResponse {
+  drafts: { workerId: string; content: string }[];
+  evaluation: {
+    synthesis: string;
+    critique: string;
+    score: number;
+    stop: boolean;
+  };
 }
 
 export function useCouncilSimulation() {
+  const { toast } = useToast();
   const [status, setStatus] = useState<SimulationState>("idle");
   const [round, setRound] = useState(0);
   const [query, setQuery] = useState("");
-  const [sessionId, setSessionId] = useState<number | null>(null);
   const [drafts, setDrafts] = useState<DraftDisplay[]>([]);
   const [critique, setCritique] = useState<string | null>(null);
   const [score, setScore] = useState(0);
   const [consensus, setConsensus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const startSimulation = useCallback(async (userQuery: string) => {
-    try {
-      setError(null);
-      setQuery(userQuery);
-      setStatus("thinking");
-      setRound(1);
-      setDrafts(WORKERS.map(w => ({ workerId: w.id, content: "", status: "pending" })));
-      setCritique(null);
-      setConsensus(null);
-      setScore(0);
-
-      // Create session
-      const session = await createSession(userQuery, 2);
-      setSessionId(session.id);
-
-      // Generate first round of drafts
-      setDrafts(WORKERS.map(w => ({ workerId: w.id, content: "", status: "streaming" })));
-      const workerDrafts = await generateWorkerDrafts(session.id);
+  const mutation = useMutation({
+    mutationFn: async (payload: { query: string; previousCritique?: string | null }) => {
+      const res = await fetch("/api/council/run-round", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
       
-      setDrafts(workerDrafts.map(d => ({
-        workerId: d.workerId,
-        content: d.content,
-        status: "complete"
-      })));
-
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.message || "Failed to run council round");
+      }
+      
+      return res.json() as Promise<RoundResponse>;
+    },
+    onSuccess: (data, variables) => {
+      setDrafts(data.drafts.map((d) => ({ ...d, status: "complete" as const })));
+      setCritique(data.evaluation.critique);
+      setScore(data.evaluation.score);
       setStatus("judging");
-    } catch (err: any) {
+
+      if (data.evaluation.stop || data.evaluation.score >= 90 || round >= 2) {
+        setTimeout(() => {
+          setStatus("consensus");
+          setConsensus(data.evaluation.synthesis);
+        }, 2000);
+      } else {
+        setTimeout(() => {
+          const nextRound = round + 1;
+          setRound(nextRound);
+          setStatus("thinking");
+          setDrafts(WORKERS.map(w => ({ workerId: w.id, content: "", status: "pending" as const })));
+          mutation.mutate({ query: variables.query, previousCritique: data.evaluation.critique });
+        }, 4000);
+      }
+    },
+    onError: (err: Error) => {
+      console.error(err);
       setError(err.message);
+      toast({ title: "Error", description: err.message, variant: "destructive" });
       setStatus("idle");
     }
-  }, []);
+  });
 
-  // Auto-judge when status changes to judging
-  useEffect(() => {
-    if (status !== "judging" || !sessionId) return;
-
-    const runJudge = async () => {
-      try {
-        const evaluation = await judgeSession(sessionId);
-        
-        setScore(evaluation.score);
-        setCritique(evaluation.critique);
-
-        // Check if we should continue or stop
-        if (evaluation.shouldStop === 1 || round >= 2) {
-          setConsensus(evaluation.synthesis);
-          setStatus("consensus");
-        } else {
-          // Move to next round
-          setTimeout(async () => {
-            setRound(round + 1);
-            setStatus("thinking");
-            setDrafts(WORKERS.map(w => ({ workerId: w.id, content: "", status: "streaming" })));
-
-            const nextDrafts = await generateWorkerDrafts(sessionId, evaluation.critique);
-            setDrafts(nextDrafts.map(d => ({
-              workerId: d.workerId,
-              content: d.content,
-              status: "complete"
-            })));
-
-            setStatus("judging");
-          }, 3000);
-        }
-      } catch (err: any) {
-        setError(err.message);
-      }
-    };
-
-    runJudge();
-  }, [status, sessionId, round]);
+  const startSimulation = useCallback((userQuery: string) => {
+    setError(null);
+    setQuery(userQuery);
+    setStatus("thinking");
+    setRound(1);
+    setConsensus(null);
+    setScore(0);
+    setCritique(null);
+    setDrafts(WORKERS.map(w => ({ workerId: w.id, content: "", status: "pending" as const })));
+    mutation.mutate({ query: userQuery });
+  }, [mutation]);
 
   return {
     status,
@@ -138,6 +132,7 @@ export function useCouncilSimulation() {
     score,
     consensus,
     error,
-    startSimulation
+    startSimulation,
+    isPending: mutation.isPending
   };
 }

@@ -1,0 +1,246 @@
+Based on the review and the error you encountered, here are the updated files to fix the client.query error, move the AI logic to the server, and implement the "Council" architecture correctly.
+1. Update package.json
+First, you need to add the OpenAI SDK to your dependencies so the server can use it.
+// package.json
+{
+  "dependencies": {
+    // ... existing dependencies
+    "openai": "^4.0.0" 
+  }
+}
+
+2. Update server/routes.ts
+This moves the "brain" of the application to the server. It replaces the empty placeholder routes with the actual OpenAI logic for the Workers and the Judge.
+import type { Express } from "express";
+import { createServer, type Server } from "http";
+import OpenAI from "openai";
+
+// Initialize OpenAI - Ensure OPENAI_API_KEY is in your Secrets/Environment variables
+const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+
+const WORKERS = {
+  "worker-a": {
+    role: "The Skeptic",
+    prompt: "You are a SKEPTICAL analyst. Look for facts, logical inconsistencies, and risks. Be harsh but constructive."
+  },
+  "worker-b": {
+    role: "The Visionary",
+    prompt: "You are a CREATIVE thinker. Look for novel solutions, out-of-the-box ideas, and future possibilities. Ignore constraints."
+  },
+  "worker-c": {
+    role: "The Realist",
+    prompt: "You are a PRAGMATIC realist. Focus on what is actionable, efficient, and can be implemented immediately with current resources."
+  }
+};
+
+async function getWorkerResponse(workerId: string, query: string, critique?: string) {
+  const worker = WORKERS[workerId as keyof typeof WORKERS];
+  const messages: any[] = [
+    { role: "system", content: worker.prompt },
+    { role: "user", content: query }
+  ];
+
+  if (critique) {
+    messages.push({ 
+      role: "user", 
+      content: `CRITICAL FEEDBACK FROM JUDGE: ${critique}. Please refine your answer based on this.` 
+    });
+  }
+
+  try {
+    const response = await client.chat.completions.create({
+      model: "gpt-4o-mini", // Cost-effective model for workers
+      messages: messages,
+      temperature: 0.9, // Higher temperature for diversity
+    });
+    return response.choices[0].message.content || "";
+  } catch (e) {
+    console.error(`Error getting response for ${workerId}:`, e);
+    return "I am currently unable to think due to an error.";
+  }
+}
+
+async function getJudgeEvaluation(query: string, drafts: Record<string, string>) {
+  const combinedDrafts = Object.entries(drafts)
+    .map(([id, text]) => `--- ${WORKERS[id as keyof typeof WORKERS].role} ---\n${text}`)
+    .join("\n\n");
+
+  const prompt = `
+    You are the Chief Editor. You have received three drafts answering the user's query: "${query}".
+    
+    Drafts:
+    ${combinedDrafts}
+    
+    Your goal is to reach consensus.
+    1. Synthesize the best parts of all three into a summary.
+    2. Provide specific critique on what is missing or conflicting.
+    3. Rate the current quality (0-100).
+    
+    Return ONLY valid JSON in this format:
+    {
+        "synthesis": "The summary of the best points...",
+        "critique": "Instructions for the workers on how to improve...",
+        "score": 85,
+        "stop": boolean (true if score > 90)
+    }
+  `;
+
+  try {
+    const response = await client.chat.completions.create({
+      model: "gpt-4o", // Smarter model for judging
+      messages: [{ role: "user", content: prompt }],
+      response_format: { type: "json_object" }
+    });
+
+    return JSON.parse(response.choices[0].message.content || "{}");
+  } catch (e) {
+    console.error("Error getting judge evaluation:", e);
+    return { synthesis: "Error in judging.", critique: "Error.", score: 0, stop: true };
+  }
+}
+
+export async function registerRoutes(httpServer: Server, app: Express): Promise<Server> {
+  
+  // POST: Run a Round of the Council
+  app.post("/api/council/run-round", async (req, res) => {
+    try {
+      const { query, previousCritique } = req.body;
+
+      if (!query) {
+        return res.status(400).json({ message: "Query is required" });
+      }
+
+      // 1. Run Workers in Parallel
+      const workerPromises = Object.keys(WORKERS).map(async (id) => {
+        const content = await getWorkerResponse(id, query, previousCritique);
+        return { id, content };
+      });
+
+      const results = await Promise.all(workerPromises);
+      const draftsMap: Record<string, string> = {};
+      results.forEach(r => draftsMap[r.id] = r.content);
+
+      // 2. Run Judge
+      const evaluation = await getJudgeEvaluation(query, draftsMap);
+
+      res.json({
+        drafts: results.map(r => ({ workerId: r.id, content: r.content })),
+        evaluation
+      });
+
+    } catch (error: any) {
+      console.error("Council Error:", error);
+      res.status(500).json({ message: error.message || "Internal Server Error" });
+    }
+  });
+
+  return httpServer;
+}
+
+3. Update client/src/lib/simulation.ts
+This removes the setTimeout mocks and the likely incorrect client.query call. It uses useMutation to hit the new backend endpoint.
+import { useState, useCallback } from "react";
+import { useMutation } from "@tanstack/react-query";
+import { apiRequest } from "./queryClient";
+import { useToast } from "@/hooks/use-toast";
+
+export type SimulationState = "idle" | "thinking" | "judging" | "consensus";
+
+export interface Worker {
+  id: string;
+  name: string;
+  role: string;
+  color: string;
+  avatar: string;
+  description: string;
+}
+
+// Static worker definitions for UI rendering
+export const WORKERS: Worker[] = [
+  { id: "worker-a", name: "The Skeptic", role: "Analyst", color: "var(--worker-a)", avatar: "🔍", description: "Looks for risks." },
+  { id: "worker-b", name: "The Visionary", role: "Creative", color: "var(--worker-b)", avatar: "🎨", description: "Proposes novel ideas." },
+  { id: "worker-c", name: "The Realist", role: "Pragmatist", color: "var(--worker-c)", avatar: "⚙️", description: "Focuses on efficiency." }
+];
+
+export interface Draft {
+  workerId: string;
+  content: string;
+  status: "pending" | "complete";
+}
+
+export function useCouncilSimulation() {
+  const { toast } = useToast();
+  const [status, setStatus] = useState<SimulationState>("idle");
+  const [round, setRound] = useState(0);
+  const [query, setQuery] = useState("");
+  const [drafts, setDrafts] = useState<Draft[]>([]);
+  const [critique, setCritique] = useState<string | null>(null);
+  const [score, setScore] = useState(0);
+  const [consensus, setConsensus] = useState<string | null>(null);
+
+  const mutation = useMutation({
+    mutationFn: async (payload: { query: string; previousCritique?: string | null }) => {
+      // Use apiRequest helper instead of trying to use client directly
+      const res = await apiRequest("POST", "/api/council/run-round", payload);
+      return res.json();
+    },
+    onSuccess: (data) => {
+      // Update State with API Data
+      setDrafts(data.drafts.map((d: any) => ({ ...d, status: "complete" })));
+      setCritique(data.evaluation.critique);
+      setScore(data.evaluation.score);
+      
+      setStatus("judging");
+
+      // Logic to proceed or stop
+      // If score is high enough or we hit round limit, show consensus
+      if (data.evaluation.stop || data.evaluation.score >= 90 || round >= 2) {
+        setTimeout(() => {
+          setStatus("consensus");
+          setConsensus(data.evaluation.synthesis);
+        }, 2000);
+      } else {
+        // Auto-start next round after a delay for reading
+        setTimeout(() => {
+          setRound(prev => prev + 1);
+          setStatus("thinking");
+          // Trigger next round with feedback
+          triggerRound(query, data.evaluation.critique);
+        }, 5000);
+      }
+    },
+    onError: (error) => {
+      console.error(error);
+      toast({ title: "Error", description: "Failed to consult the council.", variant: "destructive" });
+      setStatus("idle");
+    }
+  });
+
+  const triggerRound = (q: string, crit?: string | null) => {
+    // Reset drafts to pending state for UI feedback
+    setDrafts(WORKERS.map(w => ({ workerId: w.id, content: "", status: "pending" })));
+    mutation.mutate({ query: q, previousCritique: crit });
+  };
+
+  const startSimulation = useCallback((userQuery: string) => {
+    setQuery(userQuery);
+    setStatus("thinking");
+    setRound(1);
+    setConsensus(null);
+    setScore(0);
+    triggerRound(userQuery);
+  }, []);
+
+  return {
+    status,
+    round,
+    query,
+    drafts,
+    critique,
+    score,
+    consensus,
+    startSimulation,
+    isPending: mutation.isPending
+  };
+}
+
