@@ -19,7 +19,7 @@ import { eq, and, desc } from "drizzle-orm";
 
 // Initialize database
 const sql = neon(process.env.DATABASE_URL!);
-const db = drizzle({ client: sql });
+const db = drizzle(sql);
 
 export interface IStorage {
   // User methods
