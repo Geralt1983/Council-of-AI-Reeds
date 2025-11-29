@@ -19,6 +19,7 @@ export function ChatInput({ onSend, disabled, placeholder }: ChatInputProps) {
     if (!value.trim() || disabled) return;
     onSend(value);
     setValue("");
+    if (textareaRef.current) textareaRef.current.style.height = "auto";
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -36,7 +37,7 @@ export function ChatInput({ onSend, disabled, placeholder }: ChatInputProps) {
   }, [value]);
 
   return (
-    <div className="relative w-full max-w-3xl mx-auto">
+    <div className="relative w-full max-w-3xl mx-auto px-2 md:px-0">
       <motion.div
         animate={{
           opacity: isFocused ? 1 : 0,
@@ -47,7 +48,7 @@ export function ChatInput({ onSend, disabled, placeholder }: ChatInputProps) {
 
       <div
         className={cn(
-          "relative flex flex-col bg-background/80 backdrop-blur-xl border rounded-3xl shadow-2xl overflow-hidden transition-all duration-300",
+          "relative flex flex-col bg-background/80 backdrop-blur-xl border rounded-[20px] md:rounded-3xl shadow-2xl overflow-hidden transition-all duration-300",
           isFocused ? "border-primary/50 shadow-primary/10" : "border-white/10"
         )}
       >
@@ -62,16 +63,15 @@ export function ChatInput({ onSend, disabled, placeholder }: ChatInputProps) {
           disabled={disabled}
           rows={1}
           data-testid="input-query"
-          className="w-full min-h-[60px] max-h-[200px] bg-transparent px-6 py-5 text-lg placeholder:text-muted-foreground/50 focus:outline-none resize-none"
-          style={{ height: "60px" }}
+          className="w-full min-h-[50px] md:min-h-[60px] max-h-[150px] md:max-h-[200px] bg-transparent px-4 py-4 md:px-6 md:py-5 text-base md:text-lg placeholder:text-muted-foreground/50 focus:outline-none resize-none"
         />
 
-        <div className="flex items-center justify-between px-4 pb-3 pt-1">
-          <div className="flex items-center gap-2 text-muted-foreground/40">
-            <Button variant="ghost" size="icon" className="h-8 w-8 hover:text-primary hover:bg-primary/10 rounded-full" disabled>
+        <div className="flex items-center justify-between px-3 pb-3 md:px-4">
+          <div className="flex items-center gap-1 md:gap-2 text-muted-foreground/40">
+            <Button variant="ghost" size="icon" className="h-8 w-8 rounded-full" disabled>
               <Paperclip className="w-4 h-4" />
             </Button>
-            <Button variant="ghost" size="icon" className="h-8 w-8 hover:text-primary hover:bg-primary/10 rounded-full" disabled>
+            <Button variant="ghost" size="icon" className="h-8 w-8 rounded-full hidden md:inline-flex" disabled>
               <Mic className="w-4 h-4" />
             </Button>
           </div>
@@ -97,7 +97,7 @@ export function ChatInput({ onSend, disabled, placeholder }: ChatInputProps) {
               size="icon"
               data-testid="button-submit"
               className={cn(
-                "h-10 w-10 rounded-xl transition-all duration-300",
+                "h-9 w-9 md:h-10 md:w-10 rounded-xl transition-all duration-300",
                 value.trim() 
                   ? "bg-primary text-primary-foreground shadow-lg shadow-primary/25 scale-100" 
                   : "bg-muted text-muted-foreground scale-90 opacity-50"
