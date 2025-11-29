@@ -1,0 +1,188 @@
+This is a great opportunity to upgrade the UX. The "tiny basic box" is functional, but modern "award-winning" designs (like Linear, Raycast, or Perplexity) treat the input as a "Command Center."
+They typically share these traits:
+ * Multi-line & Auto-expanding: They use a Textarea, not an Input, allowing for complex thoughts.
+ * "Floating" Aesthetic: Deep shadows, glassmorphism (blur), and subtle border glows.
+ * Micro-interactions: The submit button often transforms or highlights only when text is present.
+ * Contextual Hints: Icons for attachments or shortcuts (e.g., ⌘ + Enter) to suggest power-user features.
+Given your "AI Council" sci-fi theme, I have designed a "Glassmorphic Neural Interface" input. It combines the clean typography of Linear with the glowing aesthetic of a sci-fi HUD.
+Step 1: Create the new Component
+Create a new file: client/src/components/council/chat-input.tsx.
+This component uses framer-motion for a "breathing" focus effect and replaces the simple Input with a robust Textarea wrapper.
+import { useState, useRef, useEffect } from "react";
+import { motion, AnimatePresence } from "framer-motion";
+import { SendHorizontal, Paperclip, Mic, Sparkles, CornerDownLeft } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { cn } from "@/lib/utils";
+
+interface ChatInputProps {
+  onSend: (value: string) => void;
+  disabled?: boolean;
+  placeholder?: string;
+}
+
+export function ChatInput({ onSend, disabled, placeholder }: ChatInputProps) {
+  const [value, setValue] = useState("");
+  const [isFocused, setIsFocused] = useState(false);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  const handleSubmit = () => {
+    if (!value.trim() || disabled) return;
+    onSend(value);
+    setValue("");
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      handleSubmit();
+    }
+  };
+
+  // Auto-resize logic (simple version)
+  useEffect(() => {
+    if (textareaRef.current) {
+      textareaRef.current.style.height = "auto";
+      textareaRef.current.style.height = textareaRef.current.scrollHeight + "px";
+    }
+  }, [value]);
+
+  return (
+    <div className="relative w-full max-w-3xl mx-auto">
+      {/* Glowing Backdrop Effect */}
+      <motion.div
+        animate={{
+          opacity: isFocused ? 1 : 0,
+          scale: isFocused ? 1.02 : 0.98,
+        }}
+        className="absolute -inset-0.5 rounded-3xl bg-gradient-to-r from-primary/50 via-purple-500/30 to-blue-500/50 blur opacity-0 transition-opacity duration-500"
+      />
+
+      <div
+        className={cn(
+          "relative flex flex-col bg-background/80 backdrop-blur-xl border border-white/10 rounded-3xl shadow-2xl overflow-hidden transition-all duration-300",
+          isFocused ? "border-primary/50 shadow-primary/10" : "border-white/10"
+        )}
+      >
+        {/* Text Area */}
+        <textarea
+          ref={textareaRef}
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          onFocus={() => setIsFocused(true)}
+          onBlur={() => setIsFocused(false)}
+          onKeyDown={handleKeyDown}
+          placeholder={placeholder || "Ask the council..."}
+          disabled={disabled}
+          rows={1}
+          className="w-full min-h-[60px] max-h-[200px] bg-transparent px-6 py-5 text-lg placeholder:text-muted-foreground/50 focus:outline-none resize-none scrollbar-hide"
+          style={{ height: "60px" }}
+        />
+
+        {/* Toolbar / Footer */}
+        <div className="flex items-center justify-between px-4 pb-3 pt-1">
+          {/* Left: Dummy Action Icons (Visual Candy) */}
+          <div className="flex items-center gap-2 text-muted-foreground/40">
+            <Button variant="ghost" size="icon" className="h-8 w-8 hover:text-primary hover:bg-primary/10 rounded-full" disabled>
+              <Paperclip className="w-4 h-4" />
+            </Button>
+            <Button variant="ghost" size="icon" className="h-8 w-8 hover:text-primary hover:bg-primary/10 rounded-full" disabled>
+              <Mic className="w-4 h-4" />
+            </Button>
+          </div>
+
+          {/* Right: Send Button */}
+          <div className="flex items-center gap-3">
+            <AnimatePresence>
+              {value.trim() && (
+                <motion.span
+                  initial={{ opacity: 0, x: 10 }}
+                  animate={{ opacity: 1, x: 0 }}
+                  exit={{ opacity: 0, x: 10 }}
+                  className="text-xs text-muted-foreground font-mono hidden md:inline-block"
+                >
+                  <span className="bg-muted px-1.5 py-0.5 rounded text-[10px] mr-1">⏎</span> 
+                  to send
+                </motion.span>
+              )}
+            </AnimatePresence>
+
+            <Button
+              onClick={handleSubmit}
+              disabled={!value.trim() || disabled}
+              size="icon"
+              className={cn(
+                "h-10 w-10 rounded-xl transition-all duration-300",
+                value.trim() 
+                  ? "bg-primary text-primary-foreground shadow-lg shadow-primary/25 scale-100" 
+                  : "bg-muted text-muted-foreground scale-90 opacity-50"
+              )}
+            >
+              <SendHorizontal className="w-5 h-5" />
+            </Button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+Step 2: Integrate into client/src/pages/council.tsx
+Now, replace your existing <form> block with this new component.
+ * Add the import at the top of council.tsx.
+ * Remove the old Input, Button, and <form>.
+ * Insert the <ChatInput />.
+Here is the specific section to update in client/src/pages/council.tsx:
+// ... existing imports
+import { ChatInput } from "@/components/council/chat-input"; // Add this
+
+// ... inside CouncilPage component ...
+
+  // You can remove the separate `handleSubmit` and `inputValue` state if you want, 
+  // OR keep `inputValue` logic inside the new component (as I did above).
+  // The new component handles its own local state and just fires `onSend`.
+
+  return (
+    <div className="min-h-screen bg-background text-foreground p-4 md:p-8 font-sans overflow-x-hidden">
+      <div className="max-w-7xl mx-auto space-y-12">
+        
+        {/* Hero / Input Section */}
+        <section className="text-center space-y-6 max-w-3xl mx-auto pt-12">
+          {/* ... (Existing Title and badges remain the same) ... */}
+          
+          <motion.h1 
+             // ... existing h1 props ...
+          >
+            The AI Council
+          </motion.h1>
+          
+          <motion.p 
+             // ... existing p props ...
+          >
+            Three distinct AI personas debate your query. <br className="hidden md:block"/>
+            A Judge synthesizes the truth.
+          </motion.p>
+
+          {/* --- REPLACEMENT STARTS HERE --- */}
+          <motion.div 
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ delay: 0.3 }}
+            className="w-full mt-10" // Added spacing
+          >
+            <ChatInput 
+              onSend={(val) => startSimulation(val)} 
+              disabled={status !== "idle" && status !== "consensus"}
+              placeholder="Present your dilemma to the Council..."
+            />
+          </motion.div>
+          {/* --- REPLACEMENT ENDS HERE --- */}
+
+        </section>
+
+        {/* ... (Rest of the file remains unchanged) ... */}
+
+Why this design wins:
+ * The "Hollow" Effect: By separating the input text from the action buttons in a structured layout, it feels like a tool, not just a form.
+ * Focus State: The glowing gradient background (bg-gradient-to-r) that fades in on focus draws the user's attention immediately.
+ * Accessibility: It supports Enter to submit, which feels faster and more "chat-like" than clicking a button.
+ * Scalability: You now have a dedicated space (the toolbar row) to add features later, like "Upload Document" or "Voice Input," without redesigning the whole box.

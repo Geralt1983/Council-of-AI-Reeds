@@ -2,16 +2,15 @@ import { useState } from "react";
 import { useCouncilSimulation, WORKERS } from "@/lib/useCouncil";
 import { WorkerCard } from "@/components/council/worker-card";
 import { JudgePanel } from "@/components/council/judge-panel";
+import { ChatInput } from "@/components/council/chat-input";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { motion, AnimatePresence } from "framer-motion";
-import { Sparkles, SendHorizontal, BrainCircuit, Plus, AlertCircle, History, PanelLeftClose, PanelLeft } from "lucide-react";
+import { Sparkles, BrainCircuit, Plus, AlertCircle, History, PanelLeftClose, PanelLeft } from "lucide-react";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 
 export default function CouncilPage() {
   const [sidebarOpen, setSidebarOpen] = useState(true);
-  const [inputValue, setInputValue] = useState("");
   
   const { 
     status, 
@@ -27,13 +26,6 @@ export default function CouncilPage() {
     history,
     loadHistory
   } = useCouncilSimulation();
-
-  const handleSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!inputValue.trim()) return;
-    startSimulation(inputValue);
-    setInputValue("");
-  };
 
   return (
     <div className="flex min-h-screen w-full bg-background text-foreground font-sans">
@@ -153,30 +145,18 @@ export default function CouncilPage() {
                 </Alert>
               )}
 
-              <motion.form 
+              <motion.div 
                 initial={{ opacity: 0, y: 20 }}
                 animate={{ opacity: 1, y: 0 }}
                 transition={{ delay: 0.3 }}
-                onSubmit={handleSubmit}
-                className="relative flex items-center w-full max-w-2xl mx-auto mt-8"
+                className="w-full mt-10"
               >
-                <Input
-                  value={inputValue}
-                  onChange={(e) => setInputValue(e.target.value)}
-                  placeholder="Enter a complex query (e.g., 'How do I balance work and life?')..."
-                  className="h-14 pl-6 pr-16 text-lg bg-background/50 border-primary/20 focus-visible:ring-primary/50 rounded-2xl shadow-lg backdrop-blur-xl"
-                  data-testid="input-query"
+                <ChatInput 
+                  onSend={(val) => startSimulation(val)} 
+                  disabled={status !== "idle" && status !== "consensus"}
+                  placeholder="Present your dilemma to the Council..."
                 />
-                <Button 
-                  type="submit" 
-                  size="icon"
-                  disabled={!inputValue.trim()}
-                  className="absolute right-2 top-2 bottom-2 w-10 h-10 rounded-xl bg-primary hover:bg-primary/90 text-primary-foreground"
-                  data-testid="button-submit"
-                >
-                  <SendHorizontal className="w-5 h-5" />
-                </Button>
-              </motion.form>
+              </motion.div>
             </section>
           )}
 
