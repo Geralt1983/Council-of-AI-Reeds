@@ -46,6 +46,14 @@ export interface DraftDisplay {
   status: "pending" | "complete";
 }
 
+export interface HistoryItem {
+  id: string;
+  query: string;
+  result: string;
+  date: string;
+  score: number;
+}
+
 interface RoundResponse {
   drafts: { workerId: string; content: string }[];
   evaluation: {
@@ -66,6 +74,7 @@ export function useCouncilSimulation() {
   const [score, setScore] = useState(0);
   const [consensus, setConsensus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [history, setHistory] = useState<HistoryItem[]>([]);
 
   const mutation = useMutation({
     mutationFn: async (payload: { query: string; previousCritique?: string | null }) => {
@@ -92,6 +101,15 @@ export function useCouncilSimulation() {
         setTimeout(() => {
           setStatus("consensus");
           setConsensus(data.evaluation.synthesis);
+          
+          const newItem: HistoryItem = {
+            id: Date.now().toString(),
+            query: query,
+            result: data.evaluation.synthesis,
+            date: new Date().toLocaleDateString(),
+            score: data.evaluation.score
+          };
+          setHistory(prev => [newItem, ...prev]);
         }, 2000);
       } else {
         setTimeout(() => {
@@ -123,6 +141,25 @@ export function useCouncilSimulation() {
     mutation.mutate({ query: userQuery });
   }, [mutation]);
 
+  const reset = useCallback(() => {
+    setStatus("idle");
+    setQuery("");
+    setDrafts([]);
+    setConsensus(null);
+    setScore(0);
+    setCritique(null);
+    setRound(0);
+    setError(null);
+  }, []);
+
+  const loadHistory = useCallback((item: HistoryItem) => {
+    setQuery(item.query);
+    setConsensus(item.result);
+    setScore(item.score);
+    setStatus("consensus");
+    setDrafts([]);
+  }, []);
+
   return {
     status,
     round,
@@ -133,6 +170,9 @@ export function useCouncilSimulation() {
     consensus,
     error,
     startSimulation,
+    reset,
+    history,
+    loadHistory,
     isPending: mutation.isPending
   };
 }
