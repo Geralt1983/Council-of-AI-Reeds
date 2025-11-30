@@ -41,8 +41,11 @@ export function WorkerCard({ worker, draft, isThinking }: WorkerCardProps) {
         <CardContent>
           <ScrollArea className="h-[200px] w-full rounded-md border border-border/50 bg-background/50 p-4">
              {draft?.content ? (
-               <p className="text-sm leading-relaxed whitespace-pre-wrap">
+               <p className="text-sm font-mono leading-relaxed whitespace-pre-wrap">
                  {draft.content}
+                 {draft.status === "streaming" && (
+                   <span className="inline-block w-2 h-4 ml-1 bg-primary animate-pulse align-middle rounded-sm" />
+                 )}
                </p>
              ) : isThinking ? (
                <div className="h-full flex flex-col items-center justify-center gap-3 text-muted-foreground/60">

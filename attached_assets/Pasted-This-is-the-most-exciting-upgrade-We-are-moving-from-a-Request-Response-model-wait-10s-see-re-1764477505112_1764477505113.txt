@@ -1,0 +1,302 @@
+This is the most exciting upgrade. We are moving from a "Request/Response" model (wait 10s -> see result) to a Real-Time Streaming model.
+To achieve this "ChatGPT-like" feel where multiple agents type simultaneously, we will use Server-Sent Events (SSE) via a standard fetch stream.
+1. The Server Upgrade (server/routes.ts)
+We need to rewrite the /api/council/run-round endpoint. Instead of waiting for Promise.all, we will:
+ * Open a stream to the client.
+ * Launch all 3 Worker streams in parallel.
+ * Pipe their tokens to the client as they arrive (tagged with workerId).
+ * Accumulate the full text in memory.
+ * Once workers finish, launch the Judge stream and pipe it.
+ * Save to the DB at the end.
+Update server/routes.ts:
+import { storage } from "./storage";
+import type { Express } from "express";
+import { createServer, type Server } from "http";
+import OpenAI from "openai";
+
+const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+
+const WORKERS = {
+  "worker-a": { role: "The Skeptic", prompt: "You are a SKEPTICAL analyst. Be harsh but constructive." },
+  "worker-b": { role: "The Visionary", prompt: "You are a CREATIVE thinker. Ignore constraints." },
+  "worker-c": { role: "The Realist", prompt: "You are a PRAGMATIC realist. Focus on action." }
+};
+
+export async function registerRoutes(httpServer: Server, app: Express): Promise<Server> {
+  
+  // 1. GET History (Unchanged)
+  app.get("/api/council/history", async (req, res) => {
+    const sessions = await storage.getSessions();
+    res.json(sessions);
+  });
+
+  // 2. RUN Round (Streaming)
+  app.post("/api/council/run-round", async (req, res) => {
+    let { query, previousCritique, sessionId, roundNumber } = req.body;
+
+    // Setup SSE Headers
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+
+    if (!query) {
+      res.write(`data: ${JSON.stringify({ error: "Query required" })}\n\n`);
+      return res.end();
+    }
+
+    try {
+      // Create session if needed
+      if (!sessionId) {
+        const session = await storage.createSession(query);
+        sessionId = session.id;
+        // Tell client the new Session ID immediately
+        res.write(`data: ${JSON.stringify({ type: "session_created", sessionId })}\n\n`);
+      }
+
+      // --- Step 1: Stream Workers (Parallel) ---
+      const workerDrafts: Record<string, string> = { "worker-a": "", "worker-b": "", "worker-c": "" };
+      
+      const workerPromises = Object.entries(WORKERS).map(async ([id, persona]) => {
+        const messages: any[] = [
+          { role: "system", content: persona.prompt },
+          { role: "user", content: query }
+        ];
+        if (previousCritique) {
+          messages.push({ role: "user", content: `CRITICAL FEEDBACK: ${previousCritique}. Refine.` });
+        }
+
+        const stream = await client.chat.completions.create({
+          model: "gpt-4o-mini",
+          messages,
+          stream: true,
+          temperature: 0.9,
+        });
+
+        for await (const chunk of stream) {
+          const content = chunk.choices[0]?.delta?.content || "";
+          if (content) {
+            workerDrafts[id] += content;
+            // Send chunk to client
+            res.write(`data: ${JSON.stringify({ type: "worker_chunk", workerId: id, chunk: content })}\n\n`);
+          }
+        }
+      });
+
+      await Promise.all(workerPromises);
+
+      // --- Step 2: Stream Judge ---
+      const combinedDrafts = Object.entries(workerDrafts)
+        .map(([id, text]) => `--- ${WORKERS[id as keyof typeof WORKERS].role} ---\n${text}`)
+        .join("\n\n");
+
+      const judgePrompt = `
+        Drafts: ${combinedDrafts}
+        Goal: Synthesize, Critique, Rate (0-100).
+        Return ONLY valid JSON.
+      `;
+
+      // Note: We cannot stream JSON easily because parsing partial JSON is hard.
+      // We will wait for the Judge's full response to ensure validity, 
+      // BUT we send a "thinking" event so the UI knows.
+      res.write(`data: ${JSON.stringify({ type: "judge_thinking" })}\n\n`);
+
+      const judgeResponse = await client.chat.completions.create({
+        model: "gpt-4o",
+        messages: [{ role: "user", content: judgePrompt }],
+        response_format: { type: "json_object" }
+      });
+
+      const evaluation = JSON.parse(judgeResponse.choices[0].message.content || "{}");
+
+      // Send Judge Result
+      res.write(`data: ${JSON.stringify({ type: "judge_result", evaluation })}\n\n`);
+
+      // --- Step 3: Save to DB ---
+      await storage.addRound(sessionId, {
+        sessionId,
+        roundNumber: roundNumber || 1,
+        workerDrafts: Object.entries(workerDrafts).map(([id, content]) => ({ workerId: id, content })),
+        critique: evaluation.critique,
+        score: evaluation.score
+      });
+
+      if (evaluation.stop || evaluation.score >= 90) {
+        await storage.updateSessionConsensus(sessionId, evaluation.synthesis);
+      }
+
+      res.end();
+
+    } catch (error: any) {
+      console.error("Stream Error:", error);
+      res.write(`data: ${JSON.stringify({ error: error.message })}\n\n`);
+      res.end();
+    }
+  });
+
+  return httpServer;
+}
+
+2. The Client Reader (client/src/lib/simulation.ts)
+We need a custom fetch reader to parse those SSE events.
+Update client/src/lib/simulation.ts:
+import { useState, useCallback, useEffect } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useToast } from "@/hooks/use-toast";
+
+// ... (keep Worker interfaces and constants) ...
+export const WORKERS: Worker[] = [
+  { id: "worker-a", name: "The Skeptic", role: "Analyst", color: "var(--worker-a)", avatar: "🔍", description: "Looks for risks." },
+  { id: "worker-b", name: "The Visionary", role: "Creative", color: "var(--worker-b)", avatar: "🎨", description: "Proposes novel ideas." },
+  { id: "worker-c", name: "The Realist", role: "Pragmatist", color: "var(--worker-c)", avatar: "⚙️", description: "Focuses on efficiency." }
+];
+
+export function useCouncilSimulation() {
+  const queryClient = useQueryClient();
+  const { toast } = useToast();
+  
+  const [status, setStatus] = useState<"idle" | "thinking" | "judging" | "consensus">("idle");
+  const [round, setRound] = useState(0);
+  const [query, setQuery] = useState("");
+  
+  // State for streaming content
+  const [drafts, setDrafts] = useState<any[]>([]);
+  const [critique, setCritique] = useState<string | null>(null);
+  const [score, setScore] = useState(0);
+  const [consensus, setConsensus] = useState<string | null>(null);
+  const [currentSessionId, setCurrentSessionId] = useState<number | null>(null);
+
+  const { data: history = [] } = useQuery({ queryKey: ["/api/council/history"] });
+
+  // THE STREAMING ENGINE
+  const runStream = async (payload: any) => {
+    try {
+      const response = await fetch("/api/council/run-round", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+
+      if (!response.body) throw new Error("No response body");
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      // Reset drafts for new round (keep structure, clear content)
+      setDrafts(WORKERS.map(w => ({ workerId: w.id, content: "", status: "streaming" })));
+      setStatus("thinking");
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n\n");
+        buffer = lines.pop() || ""; // Keep incomplete chunk in buffer
+
+        for (const line of lines) {
+          if (line.startsWith("data: ")) {
+            const data = JSON.parse(line.slice(6));
+
+            if (data.type === "session_created") {
+              setCurrentSessionId(data.sessionId);
+            }
+            
+            if (data.type === "worker_chunk") {
+              setDrafts(prev => prev.map(d => 
+                d.workerId === data.workerId 
+                  ? { ...d, content: d.content + data.chunk } 
+                  : d
+              ));
+            }
+
+            if (data.type === "judge_thinking") {
+              setDrafts(prev => prev.map(d => ({ ...d, status: "complete" })));
+              setStatus("judging");
+            }
+
+            if (data.type === "judge_result") {
+              const { synthesis, critique, score, stop } = data.evaluation;
+              setCritique(critique);
+              setScore(score);
+              
+              // Handle next steps
+              if (stop || score >= 90 || (payload.roundNumber || 1) >= 3) {
+                setStatus("consensus");
+                setConsensus(synthesis);
+                queryClient.invalidateQueries({ queryKey: ["/api/council/history"] });
+              } else {
+                // Auto-start next round
+                setTimeout(() => {
+                  setRound(r => r + 1);
+                  runStream({ 
+                    query: payload.query, 
+                    previousCritique: critique, 
+                    sessionId: currentSessionId || data.sessionId, 
+                    roundNumber: (payload.roundNumber || 1) + 1 
+                  });
+                }, 4000);
+              }
+            }
+          }
+        }
+      }
+    } catch (err) {
+      console.error("Stream failed", err);
+      toast({ title: "Error", description: "Stream connection lost", variant: "destructive" });
+      setStatus("idle");
+    }
+  };
+
+  const startSimulation = useCallback((userQuery: string) => {
+    setQuery(userQuery);
+    setRound(1);
+    setCurrentSessionId(null);
+    setConsensus(null);
+    setScore(0);
+    setCritique(null);
+    runStream({ query: userQuery, sessionId: null, roundNumber: 1 });
+  }, []);
+
+  const reset = useCallback(() => {
+    setStatus("idle");
+    setQuery("");
+    setDrafts([]);
+    setConsensus(null);
+  }, []);
+
+  // Basic load history (just static viewing for now)
+  const loadHistory = useCallback((item: any) => {
+    // This part would need a GET /api/council/session/:id endpoint to be perfect
+    // For now, we just mock it with the summary
+    setQuery(item.title);
+    setConsensus(item.consensus);
+    setStatus("consensus");
+  }, []);
+
+  return {
+    status,
+    round,
+    query,
+    drafts,
+    critique,
+    score,
+    consensus,
+    startSimulation,
+    reset,
+    history,
+    loadHistory
+  };
+}
+
+3. Visual Polish (client/src/components/council/worker-card.tsx)
+To make the streaming really pop, we should add a blinking cursor effect to the active stream.
+Update the <p> tag inside WorkerCard to this:
+<p className="text-sm font-mono leading-relaxed whitespace-pre-wrap">
+  {draft.content}
+  {/* Blinking Cursor for active stream */}
+  {draft.status === "streaming" && (
+    <span className="inline-block w-2 h-4 ml-1 bg-primary animate-pulse align-middle" />
+  )}
+</p>
+

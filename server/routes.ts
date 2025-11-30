@@ -20,69 +20,6 @@ const WORKERS = {
   }
 };
 
-async function getWorkerResponse(workerId: string, query: string, critique?: string) {
-  const worker = WORKERS[workerId as keyof typeof WORKERS];
-  const messages: OpenAI.ChatCompletionMessageParam[] = [
-    { role: "system", content: worker.prompt },
-    { role: "user", content: query }
-  ];
-
-  if (critique) {
-    messages.push({ 
-      role: "user", 
-      content: `CRITICAL FEEDBACK FROM JUDGE: ${critique}. Please refine your answer based on this.` 
-    });
-  }
-
-  try {
-    const response = await client.chat.completions.create({
-      model: "gpt-4o-mini",
-      messages: messages,
-    });
-    return response.choices[0].message.content || "";
-  } catch (e) {
-    console.error(`Error getting response for ${workerId}:`, e);
-    return "I am currently unable to think due to an error.";
-  }
-}
-
-async function getJudgeEvaluation(query: string, drafts: Record<string, string>) {
-  const combinedDrafts = Object.entries(drafts)
-    .map(([id, text]) => `--- ${WORKERS[id as keyof typeof WORKERS].role} ---\n${text}`)
-    .join("\n\n");
-
-  const prompt = `You are the Chief Editor. You have received three drafts answering the user's query: "${query}".
-    
-Drafts:
-${combinedDrafts}
-
-Your goal is to reach consensus.
-1. Synthesize the best parts of all three into a summary.
-2. Provide specific critique on what is missing or conflicting.
-3. Rate the current quality (0-100).
-
-Return ONLY valid JSON in this format:
-{
-    "synthesis": "The summary of the best points...",
-    "critique": "Instructions for the workers on how to improve...",
-    "score": 85,
-    "stop": true or false (true if score > 90)
-}`;
-
-  try {
-    const response = await client.chat.completions.create({
-      model: "gpt-5",
-      messages: [{ role: "user", content: prompt }],
-      response_format: { type: "json_object" }
-    });
-
-    return JSON.parse(response.choices[0].message.content || "{}");
-  } catch (e) {
-    console.error("Error getting judge evaluation:", e);
-    return { synthesis: "Error in judging.", critique: "Error.", score: 0, stop: true };
-  }
-}
-
 export async function registerRoutes(httpServer: Server, app: Express): Promise<Server> {
   
   app.get("/api/council/history", async (req, res) => {
@@ -110,15 +47,21 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   });
 
   app.post("/api/council/run-round", async (req, res) => {
+    let { query, previousCritique, sessionId, roundNumber } = req.body;
+
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    res.flushHeaders();
+
+    if (!query) {
+      res.write(`data: ${JSON.stringify({ type: "error", message: "Query required" })}\n\n`);
+      return res.end();
+    }
+
+    const currentRound = roundNumber || 1;
+
     try {
-      let { query, previousCritique, sessionId, roundNumber } = req.body;
-
-      if (!query) {
-        return res.status(400).json({ message: "Query is required" });
-      }
-
-      const currentRound = roundNumber || 1;
-
       if (!sessionId) {
         const session = await storage.createSession({
           query,
@@ -127,32 +70,97 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
           maxRounds: 3
         });
         sessionId = session.id;
+        res.write(`data: ${JSON.stringify({ type: "session_created", sessionId })}\n\n`);
       } else {
         await storage.updateSessionStatus(sessionId, "thinking", currentRound);
       }
 
-      console.log(`Running council round ${currentRound} for session ${sessionId}: "${query.substring(0, 50)}..."`);
+      console.log(`Streaming council round ${currentRound} for session ${sessionId}`);
 
-      const workerPromises = Object.keys(WORKERS).map(async (id) => {
-        const content = await getWorkerResponse(id, query, previousCritique);
-        return { workerId: id, content };
+      const workerDrafts: Record<string, string> = { 
+        "worker-a": "", 
+        "worker-b": "", 
+        "worker-c": "" 
+      };
+
+      const workerPromises = Object.entries(WORKERS).map(async ([id, persona]) => {
+        const messages: OpenAI.ChatCompletionMessageParam[] = [
+          { role: "system", content: persona.prompt },
+          { role: "user", content: query }
+        ];
+        
+        if (previousCritique) {
+          messages.push({ 
+            role: "user", 
+            content: `CRITICAL FEEDBACK FROM JUDGE: ${previousCritique}. Please refine your answer based on this.` 
+          });
+        }
+
+        try {
+          const stream = await client.chat.completions.create({
+            model: "gpt-4o-mini",
+            messages,
+            stream: true,
+            temperature: 0.9,
+          });
+
+          for await (const chunk of stream) {
+            const content = chunk.choices[0]?.delta?.content || "";
+            if (content) {
+              workerDrafts[id] += content;
+              res.write(`data: ${JSON.stringify({ type: "worker_chunk", workerId: id, chunk: content })}\n\n`);
+            }
+          }
+        } catch (e) {
+          console.error(`Error streaming ${id}:`, e);
+          workerDrafts[id] = "I am currently unable to think due to an error.";
+          res.write(`data: ${JSON.stringify({ type: "worker_chunk", workerId: id, chunk: workerDrafts[id] })}\n\n`);
+        }
       });
 
-      const results = await Promise.all(workerPromises);
-      
-      await storage.createDrafts(results.map(r => ({
-        sessionId,
-        workerId: r.workerId,
-        round: currentRound,
-        content: r.content
-      })));
+      await Promise.all(workerPromises);
 
-      const draftsMap: Record<string, string> = {};
-      results.forEach(r => draftsMap[r.workerId] = r.content);
+      res.write(`data: ${JSON.stringify({ type: "workers_complete" })}\n\n`);
 
       await storage.updateSessionStatus(sessionId, "judging", currentRound);
+      res.write(`data: ${JSON.stringify({ type: "judge_thinking" })}\n\n`);
 
-      const evaluation = await getJudgeEvaluation(query, draftsMap);
+      const combinedDrafts = Object.entries(workerDrafts)
+        .map(([id, text]) => `--- ${WORKERS[id as keyof typeof WORKERS].role} ---\n${text}`)
+        .join("\n\n");
+
+      const judgePrompt = `You are the Chief Editor. You have received three drafts answering the user's query: "${query}".
+    
+Drafts:
+${combinedDrafts}
+
+Your goal is to reach consensus.
+1. Synthesize the best parts of all three into a summary.
+2. Provide specific critique on what is missing or conflicting.
+3. Rate the current quality (0-100).
+
+Return ONLY valid JSON in this format:
+{
+    "synthesis": "The summary of the best points...",
+    "critique": "Instructions for the workers on how to improve...",
+    "score": 85,
+    "stop": true or false (true if score > 90)
+}`;
+
+      const judgeResponse = await client.chat.completions.create({
+        model: "gpt-5",
+        messages: [{ role: "user", content: judgePrompt }],
+        response_format: { type: "json_object" }
+      });
+
+      const evaluation = JSON.parse(judgeResponse.choices[0].message.content || "{}");
+
+      await storage.createDrafts(Object.entries(workerDrafts).map(([workerId, content]) => ({
+        sessionId,
+        workerId,
+        round: currentRound,
+        content
+      })));
 
       await storage.createEvaluation({
         sessionId,
@@ -169,17 +177,16 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         await storage.updateSessionConsensus(sessionId, evaluation.synthesis);
       }
 
+      res.write(`data: ${JSON.stringify({ type: "judge_result", evaluation, sessionId })}\n\n`);
+
       console.log(`Council round ${currentRound} complete. Score: ${evaluation.score}. Finalized: ${shouldFinalize}`);
 
-      res.json({
-        sessionId,
-        drafts: results.map(r => ({ workerId: r.workerId, content: r.content, status: "complete" })),
-        evaluation
-      });
+      res.end();
 
     } catch (error: any) {
-      console.error("Council Error:", error);
-      res.status(500).json({ message: error.message || "Internal Server Error" });
+      console.error("Stream Error:", error);
+      res.write(`data: ${JSON.stringify({ type: "error", message: error.message })}\n\n`);
+      res.end();
     }
   });
 
