@@ -91,6 +91,8 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     const currentRound = roundNumber || 1;
 
     try {
+      let context = "";
+
       if (!sessionId) {
         const session = await storage.createSession({
           query,
@@ -101,10 +103,14 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         sessionId = session.id;
         res.write(`data: ${JSON.stringify({ type: "session_created", sessionId })}\n\n`);
       } else {
+        const existingSession = await storage.getSession(sessionId);
+        if (existingSession?.finalConsensus) {
+          context = `\n\nBACKGROUND CONTEXT (The Council previously decided): "${existingSession.finalConsensus}".\nThe user is now asking a follow-up question. Build on this context.`;
+        }
         await storage.updateSessionStatus(sessionId, "thinking", currentRound);
       }
 
-      console.log(`Streaming council round ${currentRound} for session ${sessionId}`);
+      console.log(`Streaming council round ${currentRound} for session ${sessionId}${context ? " (follow-up)" : ""}`);
 
       const workerDrafts: Record<string, string> = { 
         "worker-a": "", 
@@ -113,8 +119,9 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       };
 
       const workerPromises = Object.entries(WORKERS).map(async ([id, persona]) => {
+        const systemPrompt = context ? persona.prompt + context : persona.prompt;
         const messages: OpenAI.ChatCompletionMessageParam[] = [
-          { role: "system", content: persona.prompt },
+          { role: "system", content: systemPrompt },
           { role: "user", content: query }
         ];
         
@@ -159,6 +166,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         .join("\n\n");
 
       const judgePrompt = `You are the CHIEF STRATEGIST. Three advisors have analyzed the user's query: "${query}".
+${context ? `\nPrevious Context: ${context}` : ""}
 
 Drafts:
 ${combinedDrafts}
@@ -171,6 +179,7 @@ RULES:
 3. Combine the Visionary's goal with the Realist's steps, using the Skeptic's warnings as guardrails.
 4. Be decisive. Give the user a clear next step.
 5. If the responses are generic or unhelpful, call that out and demand specifics.
+${context ? "6. Build on the previous consensus - don't repeat it, extend it." : ""}
 
 Return ONLY valid JSON in this format:
 {

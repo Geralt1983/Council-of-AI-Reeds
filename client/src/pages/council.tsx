@@ -22,10 +22,12 @@ export default function CouncilPage() {
     score, 
     consensus,
     error,
-    startSimulation,
+    submitQuery,
     reset,
     history,
-    loadHistory
+    loadHistory,
+    canInput,
+    isFollowUpReady
   } = useCouncilSimulation();
 
   return (
@@ -101,7 +103,7 @@ export default function CouncilPage() {
         </>
       )}
 
-      <main className="flex-1 overflow-x-hidden">
+      <main className="flex-1 overflow-x-hidden relative">
         <div className="md:hidden flex items-center justify-between p-4 border-b border-border/40 bg-background/80 backdrop-blur-md sticky top-0 z-30">
           <div className="flex items-center gap-2">
             <BrainCircuit className="h-5 w-5 text-primary" />
@@ -130,7 +132,7 @@ export default function CouncilPage() {
           )}
         </div>
 
-        <div className="p-4 md:p-8 max-w-7xl mx-auto space-y-8 md:space-y-12">
+        <div className="p-4 md:p-8 max-w-7xl mx-auto space-y-8 md:space-y-12 pb-40">
           
           {status === "idle" && (
             <section className="text-center space-y-6 max-w-3xl mx-auto pt-8 md:pt-20 px-2">
@@ -167,19 +169,6 @@ export default function CouncilPage() {
                   <AlertDescription>{error}</AlertDescription>
                 </Alert>
               )}
-
-              <motion.div 
-                initial={{ opacity: 0, y: 20 }}
-                animate={{ opacity: 1, y: 0 }}
-                transition={{ delay: 0.3 }}
-                className="w-full mt-8 md:mt-12"
-              >
-                <ChatInput 
-                  onSend={(val) => startSimulation(val)} 
-                  disabled={status !== "idle" && status !== "consensus"}
-                  placeholder="Present your dilemma to the Council..."
-                />
-              </motion.div>
             </section>
           )}
 
@@ -189,7 +178,7 @@ export default function CouncilPage() {
                 initial={{ opacity: 0 }}
                 animate={{ opacity: 1 }}
                 exit={{ opacity: 0 }}
-                className="space-y-8 md:space-y-12 pb-8"
+                className="space-y-8 md:space-y-12"
               >
                 <div className="text-center px-2">
                   <h2 className="text-lg md:text-2xl font-display text-foreground/80 leading-tight">"{activeQuery}"</h2>
@@ -278,13 +267,23 @@ export default function CouncilPage() {
                       data-testid="button-new-session-inline"
                     >
                       <Plus className="w-4 h-4 mr-2" />
-                      New Session
+                      New Topic
                     </Button>
                   </div>
                 </div>
               </div>
             </motion.div>
           )}
+        </div>
+
+        <div className="fixed bottom-0 left-0 right-0 p-4 bg-gradient-to-t from-background via-background/95 to-transparent z-50">
+          <div className="max-w-3xl mx-auto">
+            <ChatInput 
+              onSend={submitQuery} 
+              disabled={!canInput}
+              placeholder={isFollowUpReady ? "Ask a follow-up question..." : "Present your dilemma to the Council..."}
+            />
+          </div>
         </div>
       </main>
     </div>

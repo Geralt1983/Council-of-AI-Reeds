@@ -1,0 +1,259 @@
+To allow follow-up questions without burning tokens, we will implement a "Context Carryover" system.
+Instead of feeding the entire chat history (which gets expensive quickly), we will feed the Final Consensus of the previous round to the Workers as their "starting context" for the next round. This acts as a compressed summary of everything that happened before.
+1. Update Storage (server/storage.ts)
+We need a way to fetch a single session's data to retrieve the previous consensus.
+// ... existing imports
+import { 
+  type User, type InsertUser, 
+  type CouncilSession, type CouncilRound,
+  councilSessions, councilRounds
+} from "@shared/schema";
+import { eq } from "drizzle-orm"; // Ensure this is imported if using real DB later
+
+export interface IStorage {
+  // ... existing methods ...
+  getSession(id: number): Promise<CouncilSession | undefined>; // Add this
+}
+
+export class MemStorage implements IStorage {
+  // ... existing properties ...
+
+  // ... existing methods ...
+
+  async getSession(id: number): Promise<CouncilSession | undefined> {
+    return this.sessions.get(id);
+  }
+}
+
+export const storage = new MemStorage();
+
+2. Update Server Logic (server/routes.ts)
+Modify the run-round endpoint to inject the previous consensus into the AI's prompt.
+import { storage } from "./storage";
+import type { Express } from "express";
+import { createServer, type Server } from "http";
+import OpenAI from "openai";
+
+const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+
+const WORKERS = {
+  "worker-a": { role: "The Skeptic", prompt: "You are a SKEPTICAL analyst. Be harsh but constructive." },
+  "worker-b": { role: "The Visionary", prompt: "You are a CREATIVE thinker. Ignore constraints." },
+  "worker-c": { role: "The Realist", prompt: "You are a PRAGMATIC realist. Focus on action." }
+};
+
+export async function registerRoutes(httpServer: Server, app: Express): Promise<Server> {
+  
+  // ... (GET history route remains same) ...
+
+  app.post("/api/council/run-round", async (req, res) => {
+    let { query, previousCritique, sessionId, roundNumber } = req.body;
+
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+
+    if (!query) {
+      res.write(`data: ${JSON.stringify({ error: "Query required" })}\n\n`);
+      return res.end();
+    }
+
+    try {
+      let context = "";
+
+      // 1. Handle Session & Context
+      if (!sessionId) {
+        const session = await storage.createSession(query);
+        sessionId = session.id;
+        res.write(`data: ${JSON.stringify({ type: "session_created", sessionId })}\n\n`);
+      } else {
+        // FETCH PREVIOUS CONSENSUS to save tokens
+        const session = await storage.getSession(sessionId);
+        if (session?.consensus) {
+          context = `\n\nBACKGROUND CONTEXT (The Council previously decided): "${session.consensus}".\n The user is now asking a follow-up question.`;
+        }
+      }
+
+      // 2. Run Workers
+      const workerDrafts: Record<string, string> = { "worker-a": "", "worker-b": "", "worker-c": "" };
+      
+      const workerPromises = Object.entries(WORKERS).map(async ([id, persona]) => {
+        const messages: any[] = [
+          { role: "system", content: persona.prompt + (context ? context : "") }, // Inject Context Here
+          { role: "user", content: query }
+        ];
+        
+        if (previousCritique) {
+          messages.push({ role: "user", content: `CRITICAL FEEDBACK: ${previousCritique}. Refine.` });
+        }
+
+        try {
+          const stream = await client.chat.completions.create({
+            model: "gpt-4o-mini",
+            messages,
+            stream: true,
+            temperature: 0.9,
+          });
+
+          for await (const chunk of stream) {
+            const content = chunk.choices[0]?.delta?.content || "";
+            if (content) {
+              workerDrafts[id] += content;
+              res.write(`data: ${JSON.stringify({ type: "worker_chunk", workerId: id, chunk: content })}\n\n`);
+            }
+          }
+        } catch (err) {
+          console.error(`Worker ${id} failed`, err);
+          workerDrafts[id] = "I am silent.";
+        }
+      });
+
+      await Promise.all(workerPromises);
+
+      // 3. Run Judge (unchanged logic, just ensuring it runs)
+      res.write(`data: ${JSON.stringify({ type: "judge_thinking" })}\n\n`);
+
+      const combinedDrafts = Object.entries(workerDrafts)
+        .map(([id, text]) => `--- ${WORKERS[id as keyof typeof WORKERS].role} ---\n${text}`)
+        .join("\n\n");
+
+      const judgePrompt = `
+        Drafts: ${combinedDrafts}
+        Original Query: "${query}"
+        ${context ? `Context: ${context}` : ""}
+        
+        Goal: Synthesize, Critique, Rate (0-100).
+        Return ONLY valid JSON.
+      `;
+
+      const judgeResponse = await client.chat.completions.create({
+        model: "gpt-4o",
+        messages: [{ role: "user", content: judgePrompt }],
+        response_format: { type: "json_object" }
+      });
+
+      const evaluation = JSON.parse(judgeResponse.choices[0].message.content || "{}");
+      res.write(`data: ${JSON.stringify({ type: "judge_result", evaluation })}\n\n`);
+
+      // 4. Save
+      await storage.addRound(sessionId, {
+        sessionId,
+        roundNumber: roundNumber || 1,
+        workerDrafts: Object.entries(workerDrafts).map(([id, content]) => ({ workerId: id, content })),
+        critique: evaluation.critique,
+        score: evaluation.score
+      });
+
+      // Update consensus so it can be used for the NEXT follow-up
+      if (evaluation.stop || evaluation.score >= 90) {
+        await storage.updateSessionConsensus(sessionId, evaluation.synthesis);
+      }
+
+      res.end();
+
+    } catch (error: any) {
+      console.error("Stream Error:", error);
+      res.write(`data: ${JSON.stringify({ error: error.message })}\n\n`);
+      res.end();
+    }
+  });
+
+  return httpServer;
+}
+
+3. Update Simulation Hook (client/src/lib/simulation.ts)
+Allow the simulation to handle "follow-up" inputs without clearing the Session ID.
+// ... (imports)
+
+export function useCouncilSimulation() {
+  // ... (existing state)
+  
+  // New helper to check if we are ready for a follow-up
+  const canFollowUp = status === "consensus" || status === "idle";
+
+  const submitQuery = useCallback((userQuery: string) => {
+    // If we are already in a consensus state, this is a follow-up.
+    // We keep the currentSessionId and reset the rest.
+    const isFollowUp = status === "consensus" && currentSessionId !== null;
+    
+    setQuery(userQuery);
+    setRound(1); // Reset round count for the NEW debate
+    setScore(0);
+    setCritique(null);
+    setConsensus(null); // Clear old consensus from UI (it's safe in DB)
+    setDrafts(WORKERS.map(w => ({ workerId: w.id, content: "", status: "pending" })));
+    
+    if (!isFollowUp) {
+      setCurrentSessionId(null); // New session entirely
+    }
+
+    runStream({ 
+      query: userQuery, 
+      sessionId: isFollowUp ? currentSessionId : null, 
+      roundNumber: 1 
+    });
+  }, [status, currentSessionId]); // Dependencies
+
+  // ... (rest of the file)
+
+  return {
+    // ... other exports
+    submitQuery, // Expose this instead of startSimulation
+    canFollowUp
+  };
+}
+
+4. Update UI (client/src/pages/council.tsx)
+Enable the input box when a consensus is reached, allowing for the conversation to continue.
+// ... imports
+
+export default function CouncilPage() {
+  const { 
+    // ... other props
+    status,
+    submitQuery, // Use the new function
+    canFollowUp  // Use the new flag
+  } = useCouncilSimulation();
+
+  return (
+    <SidebarProvider>
+      {/* ... Sidebar code ... */}
+
+      <main className="flex-1 overflow-x-hidden relative"> 
+        {/* ... Header ... */}
+
+        <div className="p-4 md:p-8 max-w-7xl mx-auto space-y-8 pb-32"> {/* Added pb-32 for sticky footer space */}
+          
+          {/* Active Simulation View ... */}
+
+          {/* Consensus Result */}
+          <AnimatePresence>
+            {status === "consensus" && consensus && (
+              <motion.div 
+                initial={{ opacity: 0, y: 20 }} 
+                animate={{ opacity: 1, y: 0 }}
+                className="mb-8"
+              >
+                 {/* ... Consensus Card ... */}
+              </motion.div>
+            )}
+          </AnimatePresence>
+
+        </div>
+
+        {/* Floating Input Bar (Always visible or visible on idle/consensus) */}
+        <div className="fixed bottom-0 left-0 right-0 p-4 bg-gradient-to-t from-background via-background to-transparent z-50">
+          <div className="max-w-3xl mx-auto">
+             <ChatInput 
+                onSend={submitQuery} 
+                disabled={!canFollowUp}
+                placeholder={status === "consensus" ? "Ask a follow-up question..." : "Ask the council..."}
+             />
+          </div>
+        </div>
+
+      </main>
+    </SidebarProvider>
+  );
+}
+

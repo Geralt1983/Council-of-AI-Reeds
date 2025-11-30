@@ -80,6 +80,9 @@ export function useCouncilSimulation() {
     staleTime: 30000,
   });
 
+  const canInput = status === "idle" || status === "consensus";
+  const isFollowUpReady = status === "consensus" && sessionIdRef.current !== null;
+
   const runStream = async (payload: { 
     query: string; 
     previousCritique?: string | null;
@@ -189,19 +192,30 @@ export function useCouncilSimulation() {
     }
   };
 
-  const startSimulation = useCallback((userQuery: string) => {
+  const submitQuery = useCallback((userQuery: string) => {
+    const isFollowUp = status === "consensus" && sessionIdRef.current !== null;
+    const sessionToUse = isFollowUp ? sessionIdRef.current : null;
+    
     setError(null);
     setQuery(userQuery);
     queryRef.current = userQuery;
     setStatus("thinking");
     setRound(1);
-    setConsensus(null);
     setScore(0);
     setCritique(null);
-    sessionIdRef.current = null;
+    setConsensus(null);
     setDrafts(WORKERS.map(w => ({ workerId: w.id, content: "", status: "pending" as const })));
-    runStream({ query: userQuery, sessionId: null, roundNumber: 1 });
-  }, []);
+    
+    if (!isFollowUp) {
+      sessionIdRef.current = null;
+    }
+
+    runStream({ 
+      query: userQuery, 
+      sessionId: sessionToUse, 
+      roundNumber: 1 
+    });
+  }, [status]);
 
   const reset = useCallback(() => {
     setStatus("idle");
@@ -222,6 +236,7 @@ export function useCouncilSimulation() {
     setScore(item.score);
     setStatus("consensus");
     setDrafts([]);
+    sessionIdRef.current = null;
   }, []);
 
   return {
@@ -233,10 +248,13 @@ export function useCouncilSimulation() {
     score,
     consensus,
     error,
-    startSimulation,
+    submitQuery,
+    startSimulation: submitQuery,
     reset,
     history,
     loadHistory,
+    canInput,
+    isFollowUpReady,
     isPending: status === "thinking" || status === "judging"
   };
 }
