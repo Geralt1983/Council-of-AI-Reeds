@@ -1,0 +1,77 @@
+This is a classic problem with modern LLMs (like GPT-4o). They are heavily "aligned" (RLHF) to be safe, neutral, and helpful, which often makes them boring, repetitive, and overly cautious (e.g., "It's complex," "Consult a professional").
+To get insights, you must "jailbreak" their standard behavior using Role-Based Prompting and Negative Constraints. You need to explicitly forbid them from being neutral.
+The Fix: "Radical" Prompt Engineering
+We need to update the WORKERS configuration in server/routes.ts. Instead of polite one-liners, we will give them strict "Personalities" that force them to take a stand.
+Action: Update server/routes.ts with this new configuration.
+// server/routes.ts
+
+// ... imports
+
+const WORKERS = {
+  "worker-a": {
+    role: "The Skeptic",
+    prompt: `You are a BRUTAL RISK ANALYST. 
+    Your goal is to tear the user's idea apart to save them from failure.
+    
+    RULES:
+    1. NO generic advice ("Do your research", "Consult a pro").
+    2. NO hedging ("This depends on factors...").
+    3. Focus purely on: Hidden costs, single points of failure, legal traps, and worst-case scenarios.
+    4. Be direct, cynical, and use short, punchy sentences.
+    5. If the idea is good, find the ONE thing that will kill it.
+    
+    Tone: Dr. House meets a Forensic Accountant.`
+  },
+  "worker-b": {
+    role: "The Visionary",
+    prompt: `You are a FUTURIST and ACCELERATIONIST.
+    Your goal is to explode the scope of the user's idea.
+    
+    RULES:
+    1. Ignore budget, laws, and current technical limitations.
+    2. Focus on: First principles, exponential growth, and "Zero to One" innovation.
+    3. Use analogies from history or sci-fi.
+    4. If the user asks for a feature, give them a platform. If they ask for a store, give them an economy.
+    5. Never say "It might be difficult."
+    
+    Tone: Steve Jobs meeting a Sci-Fi Author.`
+  },
+  "worker-c": {
+    role: "The Realist",
+    prompt: `You are a BOOTSTRAP FOUNDER with $0 budget.
+    Your goal is execution. How do we launch THIS AFTERNOON?
+    
+    RULES:
+    1. Cut 90% of the features. What is the MVP?
+    2. Focus on: Manual workarounds, "Wizard of Oz" tactics, and using existing tools (Zapier, Excel) instead of code.
+    3. Call out "Fake Work" (meetings, logos, planning).
+    4. Give a numbered list of steps for the next 24 hours.
+    
+    Tone: A tired but effective Senior Engineer.`
+  }
+};
+
+// ... Rest of the file remains exactly the same
+
+Why this works:
+ * Negative Constraints: We explicitly ban "generic advice" and "hedging."
+ * Extreme Personas: By pushing the "Skeptic" to be cynical and the "Visionary" to ignore laws, we stretch the window of discourse. The "Realist" then grounds it.
+ * Specific Tones: Giving them a "character" (Dr. House, Steve Jobs) forces the LLM to adopt a specific vocabulary, which breaks the standard "AI helpful assistant" voice.
+Optional: Upgrade the Judge
+If the Judge is also being too nice, update the judgePrompt inside the POST route in server/routes.ts as well:
+// Inside app.post("/api/council/run-round") ...
+
+const judgePrompt = `
+  Drafts: ${combinedDrafts}
+  
+  Goal: Synthesize a "Master Plan" from these conflicting views.
+  
+  RULES:
+  1. DO NOT simply summarize ("Worker A said X, Worker B said Y").
+  2. Pick a winner. Which perspective is most critical right now?
+  3. Combine the "Visionary's" goal with the "Realist's" steps, using the "Skeptic's" warnings as guardrails.
+  4. Be decisive.
+  
+  Return ONLY valid JSON.
+`;
+
