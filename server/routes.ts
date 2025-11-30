@@ -1,8 +1,8 @@
 import type { Express } from "express";
 import { createServer, type Server } from "http";
 import OpenAI from "openai";
+import { storage } from "./storage";
 
-// the newest OpenAI model is "gpt-5" which was released August 7, 2025. do not change this unless explicitly requested by the user
 const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 const WORKERS = {
@@ -70,7 +70,6 @@ Return ONLY valid JSON in this format:
 }`;
 
   try {
-    // the newest OpenAI model is "gpt-5" which was released August 7, 2025
     const response = await client.chat.completions.create({
       model: "gpt-5",
       messages: [{ role: "user", content: prompt }],
@@ -86,34 +85,95 @@ Return ONLY valid JSON in this format:
 
 export async function registerRoutes(httpServer: Server, app: Express): Promise<Server> {
   
-  // POST: Run a Round of the Council
+  app.get("/api/council/history", async (req, res) => {
+    try {
+      const sessions = await storage.getAllSessions();
+      
+      const history = await Promise.all(sessions
+        .filter(s => s.status === "consensus" && s.finalConsensus)
+        .map(async (s) => {
+          const latestEval = await storage.getEvaluationBySessionAndRound(s.id, s.currentRound);
+          return {
+            id: s.id.toString(),
+            query: s.query,
+            result: s.finalConsensus || "",
+            date: s.createdAt ? new Date(s.createdAt).toLocaleString() : "",
+            score: latestEval?.score || 0
+          };
+        }));
+      
+      res.json(history);
+    } catch (error: any) {
+      console.error("Error fetching history:", error);
+      res.status(500).json({ message: error.message || "Failed to fetch history" });
+    }
+  });
+
   app.post("/api/council/run-round", async (req, res) => {
     try {
-      const { query, previousCritique } = req.body;
+      let { query, previousCritique, sessionId, roundNumber } = req.body;
 
       if (!query) {
         return res.status(400).json({ message: "Query is required" });
       }
 
-      console.log(`Running council round for query: "${query.substring(0, 50)}..."`);
+      const currentRound = roundNumber || 1;
 
-      // 1. Run Workers in Parallel
+      if (!sessionId) {
+        const session = await storage.createSession({
+          query,
+          status: "thinking",
+          currentRound: 1,
+          maxRounds: 3
+        });
+        sessionId = session.id;
+      } else {
+        await storage.updateSessionStatus(sessionId, "thinking", currentRound);
+      }
+
+      console.log(`Running council round ${currentRound} for session ${sessionId}: "${query.substring(0, 50)}..."`);
+
       const workerPromises = Object.keys(WORKERS).map(async (id) => {
         const content = await getWorkerResponse(id, query, previousCritique);
-        return { id, content };
+        return { workerId: id, content };
       });
 
       const results = await Promise.all(workerPromises);
-      const draftsMap: Record<string, string> = {};
-      results.forEach(r => draftsMap[r.id] = r.content);
+      
+      await storage.createDrafts(results.map(r => ({
+        sessionId,
+        workerId: r.workerId,
+        round: currentRound,
+        content: r.content
+      })));
 
-      // 2. Run Judge
+      const draftsMap: Record<string, string> = {};
+      results.forEach(r => draftsMap[r.workerId] = r.content);
+
+      await storage.updateSessionStatus(sessionId, "judging", currentRound);
+
       const evaluation = await getJudgeEvaluation(query, draftsMap);
 
-      console.log(`Council round complete. Score: ${evaluation.score}`);
+      await storage.createEvaluation({
+        sessionId,
+        round: currentRound,
+        score: evaluation.score || 0,
+        critique: evaluation.critique || "",
+        synthesis: evaluation.synthesis || "",
+        shouldStop: (evaluation.stop || evaluation.score >= 90) ? 1 : 0
+      });
+
+      const shouldFinalize = evaluation.stop || evaluation.score >= 90 || currentRound >= 3;
+      
+      if (shouldFinalize) {
+        await storage.updateSessionConsensus(sessionId, evaluation.synthesis);
+      }
+
+      console.log(`Council round ${currentRound} complete. Score: ${evaluation.score}. Finalized: ${shouldFinalize}`);
 
       res.json({
-        drafts: results.map(r => ({ workerId: r.id, content: r.content })),
+        sessionId,
+        drafts: results.map(r => ({ workerId: r.workerId, content: r.content, status: "complete" })),
         evaluation
       });
 

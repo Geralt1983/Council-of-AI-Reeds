@@ -13,11 +13,9 @@ import {
   evaluations
 } from "@shared/schema";
 import { drizzle } from "drizzle-orm/neon-serverless";
-import { neon } from "@neondatabase/serverless";
 import { eq, and, desc } from "drizzle-orm";
 
-const sql = neon(process.env.DATABASE_URL!);
-const db = drizzle(sql);
+const db = drizzle(process.env.DATABASE_URL!);
 
 export interface IStorage {
   getUser(id: string): Promise<User | undefined>;

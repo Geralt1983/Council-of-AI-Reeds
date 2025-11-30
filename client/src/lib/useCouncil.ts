@@ -1,5 +1,5 @@
-import { useState, useCallback, useEffect } from "react";
-import { useMutation } from "@tanstack/react-query";
+import { useState, useCallback } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useToast } from "@/hooks/use-toast";
 
 export type SimulationState = "idle" | "thinking" | "judging" | "consensus";
@@ -55,6 +55,7 @@ export interface HistoryItem {
 }
 
 interface RoundResponse {
+  sessionId: number;
   drafts: { workerId: string; content: string }[];
   evaluation: {
     synthesis: string;
@@ -64,10 +65,10 @@ interface RoundResponse {
   };
 }
 
-const HISTORY_STORAGE_KEY = "council_history";
-
 export function useCouncilSimulation() {
   const { toast } = useToast();
+  const queryClient = useQueryClient();
+  
   const [status, setStatus] = useState<SimulationState>("idle");
   const [round, setRound] = useState(0);
   const [query, setQuery] = useState("");
@@ -76,27 +77,25 @@ export function useCouncilSimulation() {
   const [score, setScore] = useState(0);
   const [consensus, setConsensus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [currentSessionId, setCurrentSessionId] = useState<number | null>(null);
 
-  const [history, setHistory] = useState<HistoryItem[]>(() => {
-    try {
-      const saved = localStorage.getItem(HISTORY_STORAGE_KEY);
-      return saved ? JSON.parse(saved) : [];
-    } catch (e) {
-      console.error("Failed to load history:", e);
-      return [];
-    }
+  const { data: history = [] } = useQuery<HistoryItem[]>({
+    queryKey: ["/api/council/history"],
+    queryFn: async () => {
+      const res = await fetch("/api/council/history");
+      if (!res.ok) throw new Error("Failed to fetch history");
+      return res.json();
+    },
+    staleTime: 30000,
   });
 
-  useEffect(() => {
-    try {
-      localStorage.setItem(HISTORY_STORAGE_KEY, JSON.stringify(history));
-    } catch (e) {
-      console.error("Failed to save history:", e);
-    }
-  }, [history]);
-
   const mutation = useMutation({
-    mutationFn: async (payload: { query: string; previousCritique?: string | null }) => {
+    mutationFn: async (payload: { 
+      query: string; 
+      previousCritique?: string | null;
+      sessionId?: number | null;
+      roundNumber?: number;
+    }) => {
       const res = await fetch("/api/council/run-round", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -111,32 +110,35 @@ export function useCouncilSimulation() {
       return res.json() as Promise<RoundResponse>;
     },
     onSuccess: (data, variables) => {
+      if (data.sessionId) {
+        setCurrentSessionId(data.sessionId);
+      }
+      
       setDrafts(data.drafts.map((d) => ({ ...d, status: "complete" as const })));
       setCritique(data.evaluation.critique);
       setScore(data.evaluation.score);
       setStatus("judging");
 
-      if (data.evaluation.stop || data.evaluation.score >= 90 || round >= 2) {
+      const currentRoundNum = variables.roundNumber || 1;
+
+      if (data.evaluation.stop || data.evaluation.score >= 90 || currentRoundNum >= 3) {
         setTimeout(() => {
           setStatus("consensus");
           setConsensus(data.evaluation.synthesis);
-          
-          const newItem: HistoryItem = {
-            id: Date.now().toString(),
-            query: query,
-            result: data.evaluation.synthesis,
-            date: new Date().toLocaleString(),
-            score: data.evaluation.score
-          };
-          setHistory(prev => [newItem, ...prev]);
+          queryClient.invalidateQueries({ queryKey: ["/api/council/history"] });
         }, 2000);
       } else {
         setTimeout(() => {
-          const nextRound = round + 1;
+          const nextRound = currentRoundNum + 1;
           setRound(nextRound);
           setStatus("thinking");
           setDrafts(WORKERS.map(w => ({ workerId: w.id, content: "", status: "pending" as const })));
-          mutation.mutate({ query: variables.query, previousCritique: data.evaluation.critique });
+          mutation.mutate({ 
+            query: variables.query, 
+            previousCritique: data.evaluation.critique,
+            sessionId: data.sessionId,
+            roundNumber: nextRound
+          });
         }, 4000);
       }
     },
@@ -156,8 +158,9 @@ export function useCouncilSimulation() {
     setConsensus(null);
     setScore(0);
     setCritique(null);
+    setCurrentSessionId(null);
     setDrafts(WORKERS.map(w => ({ workerId: w.id, content: "", status: "pending" as const })));
-    mutation.mutate({ query: userQuery });
+    mutation.mutate({ query: userQuery, sessionId: null, roundNumber: 1 });
   }, [mutation]);
 
   const reset = useCallback(() => {
@@ -169,6 +172,7 @@ export function useCouncilSimulation() {
     setCritique(null);
     setRound(0);
     setError(null);
+    setCurrentSessionId(null);
   }, []);
 
   const loadHistory = useCallback((item: HistoryItem) => {
@@ -177,11 +181,6 @@ export function useCouncilSimulation() {
     setScore(item.score);
     setStatus("consensus");
     setDrafts([]);
-  }, []);
-
-  const clearHistory = useCallback(() => {
-    setHistory([]);
-    localStorage.removeItem(HISTORY_STORAGE_KEY);
   }, []);
 
   return {
@@ -197,7 +196,6 @@ export function useCouncilSimulation() {
     reset,
     history,
     loadHistory,
-    clearHistory,
     isPending: mutation.isPending
   };
 }
