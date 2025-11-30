@@ -12,38 +12,33 @@ import {
   drafts,
   evaluations
 } from "@shared/schema";
-import { randomUUID } from "crypto";
 import { drizzle } from "drizzle-orm/neon-serverless";
 import { neon } from "@neondatabase/serverless";
 import { eq, and, desc } from "drizzle-orm";
 
-// Initialize database
 const sql = neon(process.env.DATABASE_URL!);
 const db = drizzle(sql);
 
 export interface IStorage {
-  // User methods
   getUser(id: string): Promise<User | undefined>;
   getUserByUsername(username: string): Promise<User | undefined>;
   createUser(user: InsertUser): Promise<User>;
   
-  // Session methods
   createSession(session: InsertSession): Promise<Session>;
   getSession(id: number): Promise<Session | undefined>;
+  getAllSessions(): Promise<Session[]>;
   updateSessionStatus(id: number, status: string, round?: number): Promise<void>;
   updateSessionConsensus(id: number, consensus: string): Promise<void>;
   
-  // Draft methods
   createDraft(draft: InsertDraft): Promise<Draft>;
+  createDrafts(draftsList: InsertDraft[]): Promise<Draft[]>;
   getDraftsBySessionAndRound(sessionId: number, round: number): Promise<Draft[]>;
   
-  // Evaluation methods
   createEvaluation(evaluation: InsertEvaluation): Promise<Evaluation>;
   getEvaluationBySessionAndRound(sessionId: number, round: number): Promise<Evaluation | undefined>;
 }
 
 export class DatabaseStorage implements IStorage {
-  // User methods
   async getUser(id: string): Promise<User | undefined> {
     const result = await db.select().from(users).where(eq(users.id, id));
     return result[0];
@@ -59,7 +54,6 @@ export class DatabaseStorage implements IStorage {
     return result[0];
   }
 
-  // Session methods
   async createSession(session: InsertSession): Promise<Session> {
     const result = await db.insert(sessions).values(session).returning();
     return result[0];
@@ -68,6 +62,10 @@ export class DatabaseStorage implements IStorage {
   async getSession(id: number): Promise<Session | undefined> {
     const result = await db.select().from(sessions).where(eq(sessions.id, id));
     return result[0];
+  }
+
+  async getAllSessions(): Promise<Session[]> {
+    return await db.select().from(sessions).orderBy(desc(sessions.createdAt));
   }
 
   async updateSessionStatus(id: number, status: string, round?: number): Promise<void> {
@@ -84,10 +82,15 @@ export class DatabaseStorage implements IStorage {
       .where(eq(sessions.id, id));
   }
 
-  // Draft methods
   async createDraft(draft: InsertDraft): Promise<Draft> {
     const result = await db.insert(drafts).values(draft).returning();
     return result[0];
+  }
+
+  async createDrafts(draftsList: InsertDraft[]): Promise<Draft[]> {
+    if (draftsList.length === 0) return [];
+    const result = await db.insert(drafts).values(draftsList).returning();
+    return result;
   }
 
   async getDraftsBySessionAndRound(sessionId: number, round: number): Promise<Draft[]> {
@@ -96,7 +99,6 @@ export class DatabaseStorage implements IStorage {
       .orderBy(drafts.workerId);
   }
 
-  // Evaluation methods
   async createEvaluation(evaluation: InsertEvaluation): Promise<Evaluation> {
     const result = await db.insert(evaluations).values(evaluation).returning();
     return result[0];

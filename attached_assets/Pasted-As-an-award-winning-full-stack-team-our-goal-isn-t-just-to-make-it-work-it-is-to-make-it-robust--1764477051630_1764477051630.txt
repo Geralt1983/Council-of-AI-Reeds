@@ -1,0 +1,262 @@
+As an award-winning full-stack team, our goal isn't just to make it "work"; it is to make it robust, delightful, and scalable. We are moving from a "Prototype" to a "Product."
+Here is our roadmap for the next sprint, categorized by impact.
+🏛️ The Roadmap
+1. Persistence Layer (The "Memory" Upgrade)
+ * Current State: History lives in localStorage (Client-side). If you clear your cache or switch devices, your data is lost.
+ * The Upgrade: Move history to the Server (Postgres). We will create sessions and messages tables. This allows you to "resume" a debate from your phone that you started on your laptop.
+2. Streaming Intelligence (The "Live" Feel)
+ * Current State: You click "Send" → Wait 5 seconds → Text appears all at once.
+ * The Upgrade: Token Streaming. The text should flow onto the screen as the AI "thinks," just like ChatGPT. This reduces perceived latency and makes the app feel alive.
+3. The "God Mode" View (Analytics)
+ * Current State: You see a score (0-100).
+ * The Upgrade: A Radar Chart visualization showing how the draft leans (e.g., "Risk Averse" vs. "Innovative" vs. "Actionable").
+🚀 Immediate Action: Implement Database Persistence
+Let's execute Item #1 (Persistence). We will upgrade your backend to store these sessions properly.
+Step 1: Define the Data Structure
+File: shared/schema.ts
+We need to track council_sessions (the conversation topic) and council_rounds (the back-and-forth).
+import { pgTable, text, serial, integer, boolean, jsonb, timestamp } from "drizzle-orm/pg-core";
+import { createInsertSchema } from "drizzle-zod";
+import { z } from "zod";
+
+export const councilSessions = pgTable("council_sessions", {
+  id: serial("id").primaryKey(),
+  title: text("title").notNull(), // The user's initial query
+  consensus: text("consensus"),   // The final result
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+export const councilRounds = pgTable("council_rounds", {
+  id: serial("id").primaryKey(),
+  sessionId: integer("session_id").notNull(),
+  roundNumber: integer("round_number").notNull(),
+  workerDrafts: jsonb("worker_drafts").notNull(), // Stores the 3 personas' text
+  critique: text("critique"),
+  score: integer("score"),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+// Schemas for API validation
+export const insertSessionSchema = createInsertSchema(councilSessions).pick({
+  title: true,
+  consensus: true,
+});
+
+export type CouncilSession = typeof councilSessions.$inferSelect;
+export type CouncilRound = typeof councilRounds.$inferSelect;
+
+Step 2: Update Storage Logic
+File: server/storage.ts
+We will update the storage interface to handle these new tables. (I will implement this in the existing MemStorage for now so it works immediately without you needing to provision a live Postgres database yet).
+import { 
+  type User, type InsertUser, 
+  type CouncilSession, type CouncilRound,
+  councilSessions, councilRounds
+} from "@shared/schema";
+
+export interface IStorage {
+  // User auth (existing)
+  getUser(id: string): Promise<User | undefined>;
+  getUserByUsername(username: string): Promise<User | undefined>;
+  createUser(user: InsertUser): Promise<User>;
+
+  // Council History
+  createSession(title: string): Promise<CouncilSession>;
+  getSessions(): Promise<CouncilSession[]>;
+  addRound(sessionId: number, round: Omit<CouncilRound, "id" | "createdAt">): Promise<CouncilRound>;
+  updateSessionConsensus(id: number, consensus: string): Promise<void>;
+}
+
+export class MemStorage implements IStorage {
+  private users: Map<string, User>;
+  private sessions: Map<number, CouncilSession>;
+  private rounds: Map<number, CouncilRound>;
+  private sessionIdCounter = 1;
+  private roundIdCounter = 1;
+
+  constructor() {
+    this.users = new Map();
+    this.sessions = new Map();
+    this.rounds = new Map();
+  }
+
+  // ... (User methods remain the same) ...
+  async getUser(id: string): Promise<User | undefined> { return this.users.get(id); }
+  async getUserByUsername(username: string): Promise<User | undefined> { 
+    return Array.from(this.users.values()).find(u => u.username === username); 
+  }
+  async createUser(insertUser: InsertUser): Promise<User> {
+    const id = "user-" + Math.random();
+    const user = { ...insertUser, id };
+    this.users.set(id, user);
+    return user;
+  }
+
+  // --- Council Methods ---
+
+  async createSession(title: string): Promise<CouncilSession> {
+    const id = this.sessionIdCounter++;
+    const session: CouncilSession = { id, title, consensus: null, createdAt: new Date() };
+    this.sessions.set(id, session);
+    return session;
+  }
+
+  async getSessions(): Promise<CouncilSession[]> {
+    return Array.from(this.sessions.values()).sort((a, b) => b.id - a.id);
+  }
+
+  async addRound(sessionId: number, roundData: any): Promise<CouncilRound> {
+    const id = this.roundIdCounter++;
+    const round: CouncilRound = { ...roundData, id, sessionId, createdAt: new Date() };
+    this.rounds.set(id, round);
+    return round;
+  }
+
+  async updateSessionConsensus(id: number, consensus: string): Promise<void> {
+    const session = this.sessions.get(id);
+    if (session) {
+      this.sessions.set(id, { ...session, consensus });
+    }
+  }
+}
+
+export const storage = new MemStorage();
+
+Step 3: Connect API to Storage
+File: server/routes.ts
+We update the route to save data as it generates it.
+import { storage } from "./storage"; // Import storage
+
+// ... (keep OpenAI setup and helper functions getWorkerResponse/getJudgeEvaluation) ...
+
+export async function registerRoutes(httpServer: Server, app: Express): Promise<Server> {
+  
+  // 1. GET History
+  app.get("/api/council/history", async (req, res) => {
+    const sessions = await storage.getSessions();
+    res.json(sessions);
+  });
+
+  // 2. RUN Round
+  app.post("/api/council/run-round", async (req, res) => {
+    try {
+      // sessionId is optional. If null, we create a new session.
+      let { query, previousCritique, sessionId, roundNumber } = req.body;
+
+      if (!query) return res.status(400).json({ message: "Query is required" });
+
+      // Create session if it's the first round
+      if (!sessionId) {
+        const session = await storage.createSession(query);
+        sessionId = session.id;
+      }
+
+      // --- Execute AI Logic (Workers + Judge) ---
+      const workerPromises = Object.keys(WORKERS).map(async (id) => {
+        const content = await getWorkerResponse(id, query, previousCritique);
+        return { workerId: id, content };
+      });
+
+      const rawResults = await Promise.all(workerPromises);
+      
+      // Map for Judge
+      const draftsMap: Record<string, string> = {};
+      rawResults.forEach(r => draftsMap[r.workerId] = r.content);
+
+      const evaluation = await getJudgeEvaluation(query, draftsMap);
+
+      // --- Save Round to DB ---
+      await storage.addRound(sessionId, {
+        sessionId,
+        roundNumber: roundNumber || 1,
+        workerDrafts: rawResults, // Save the array of drafts
+        critique: evaluation.critique,
+        score: evaluation.score
+      });
+
+      // If consensus reached, update the session
+      if (evaluation.stop || evaluation.score >= 90) {
+        await storage.updateSessionConsensus(sessionId, evaluation.synthesis);
+      }
+
+      res.json({
+        sessionId,
+        drafts: rawResults.map(r => ({ workerId: r.workerId, content: r.content, status: "complete" })),
+        evaluation
+      });
+
+    } catch (error: any) {
+      console.error("Council Error:", error);
+      res.status(500).json({ message: error.message || "Internal Server Error" });
+    }
+  });
+
+  return httpServer;
+}
+
+Step 4: Update Client to Fetch History
+File: client/src/lib/simulation.ts
+Replace the localStorage logic with useQuery.
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+// ... imports
+
+export function useCouncilSimulation() {
+  const queryClient = useQueryClient();
+  const { toast } = useToast();
+  
+  // State
+  const [status, setStatus] = useState<SimulationState>("idle");
+  const [currentSessionId, setCurrentSessionId] = useState<number | null>(null);
+  // ... (keep other state: round, drafts, etc.)
+
+  // FETCH HISTORY from Server
+  const { data: history = [] } = useQuery({
+    queryKey: ["/api/council/history"],
+  });
+
+  // RUN MUTATION
+  const mutation = useMutation({
+    mutationFn: async (payload: any) => {
+      const res = await apiRequest("POST", "/api/council/run-round", payload);
+      return res.json();
+    },
+    onSuccess: (data) => {
+      // Save the session ID so subsequent rounds attach to the same history item
+      if (data.sessionId) setCurrentSessionId(data.sessionId);
+      
+      // Refresh history list in sidebar
+      queryClient.invalidateQueries({ queryKey: ["/api/council/history"] });
+
+      // ... (Rest of logic: update drafts, set critique, setTimeout for next round) ...
+    }
+  });
+
+  // ...
+  
+  const startSimulation = useCallback((userQuery: string) => {
+    setQuery(userQuery);
+    setStatus("thinking");
+    setRound(1);
+    setCurrentSessionId(null); // Clear ID to start new session
+    setConsensus(null);
+    setScore(0);
+    
+    // Trigger round 1 (pass null as sessionId)
+    setDrafts(WORKERS.map(w => ({ workerId: w.id, content: "", status: "pending" })));
+    mutation.mutate({ query: userQuery, previousCritique: null, sessionId: null, roundNumber: 1 });
+  }, []);
+
+  // Update triggerRound to pass the currentSessionId
+  const triggerRound = (q: string, crit?: string | null) => {
+     // ...
+     mutation.mutate({ 
+       query: q, 
+       previousCritique: crit, 
+       sessionId: currentSessionId, // Pass the ID!
+       roundNumber: round + 1 
+     });
+  };
+
+  // ... return ...
+}
+
