@@ -31,7 +31,7 @@ export default function CouncilPage() {
   } = useCouncilSimulation();
 
   return (
-    <div className="flex min-h-screen w-full bg-background text-foreground font-sans">
+    <div className="flex min-h-[100dvh] w-full bg-background text-foreground font-sans">
       
       {sidebarOpen && (
         <>

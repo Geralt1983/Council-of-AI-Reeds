@@ -1,3 +1,8 @@
+This is a classic "invisible layer" problem.
+In the ChatInput component, the glowing background effect (motion.div) sits on top of the text box. Even though it is transparent (opacity 0) when not focused, it is still physically blocking your finger from tapping the text area.
+Here is the fix: Make the glow layer "click-through" by adding pointer-events-none.
+1. Fix the Input Component (client/src/components/council/chat-input.tsx)
+Add the pointer-events-none class to the first motion.div.
 import { useState, useRef, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { SendHorizontal, Paperclip, Mic } from "lucide-react";
@@ -32,12 +37,15 @@ export function ChatInput({ onSend, disabled, placeholder }: ChatInputProps) {
   useEffect(() => {
     if (textareaRef.current) {
       textareaRef.current.style.height = "auto";
-      textareaRef.current.style.height = Math.min(textareaRef.current.scrollHeight, 200) + "px";
+      textareaRef.current.style.height = textareaRef.current.scrollHeight + "px";
     }
   }, [value]);
 
   return (
     <div className="relative w-full max-w-3xl mx-auto px-2 md:px-0">
+      {/* FIX: Added 'pointer-events-none' so clicks pass through this layer 
+         to the textarea below.
+      */}
       <motion.div
         animate={{
           opacity: isFocused ? 1 : 0,
@@ -48,7 +56,7 @@ export function ChatInput({ onSend, disabled, placeholder }: ChatInputProps) {
 
       <div
         className={cn(
-          "relative flex flex-col bg-background/80 backdrop-blur-xl border rounded-[20px] md:rounded-3xl shadow-2xl overflow-hidden transition-all duration-300",
+          "relative flex flex-col bg-background/80 backdrop-blur-xl border border-white/10 rounded-[24px] shadow-2xl overflow-hidden transition-all duration-300",
           isFocused ? "border-primary/50 shadow-primary/10" : "border-white/10"
         )}
       >
@@ -62,30 +70,27 @@ export function ChatInput({ onSend, disabled, placeholder }: ChatInputProps) {
           placeholder={placeholder || "Ask the council..."}
           disabled={disabled}
           rows={1}
-          data-testid="input-query"
-          className="relative z-10 w-full min-h-[50px] md:min-h-[60px] max-h-[150px] md:max-h-[200px] bg-transparent px-4 py-4 md:px-6 md:py-5 text-base md:text-lg placeholder:text-muted-foreground/50 focus:outline-none resize-none"
+          // Added z-10 relative to ensure it's above any background noise
+          className="relative z-10 w-full min-h-[52px] max-h-[200px] bg-transparent px-5 py-4 text-base md:text-lg placeholder:text-muted-foreground/50 focus:outline-none resize-none scrollbar-hide"
         />
 
         <div className="flex items-center justify-between px-3 pb-3 md:px-4">
-          <div className="flex items-center gap-1 md:gap-2 text-muted-foreground/40">
-            <Button variant="ghost" size="icon" className="h-8 w-8 rounded-full" disabled>
+          <div className="flex items-center gap-1 text-muted-foreground/40">
+            <Button variant="ghost" size="icon" className="h-8 w-8 rounded-full hover:bg-white/10" disabled>
               <Paperclip className="w-4 h-4" />
-            </Button>
-            <Button variant="ghost" size="icon" className="h-8 w-8 rounded-full hidden md:inline-flex" disabled>
-              <Mic className="w-4 h-4" />
             </Button>
           </div>
 
           <div className="flex items-center gap-3 relative z-20">
             <AnimatePresence>
-              {value.trim() && (
+              {value.trim() && !disabled && (
                 <motion.span
                   initial={{ opacity: 0, x: 10 }}
                   animate={{ opacity: 1, x: 0 }}
                   exit={{ opacity: 0, x: 10 }}
                   className="text-xs text-muted-foreground font-mono hidden md:inline-block"
                 >
-                  <span className="bg-muted px-1.5 py-0.5 rounded text-[10px] mr-1">Enter</span> 
+                  <span className="bg-muted px-1.5 py-0.5 rounded text-[10px] mr-1">⏎</span> 
                   to send
                 </motion.span>
               )}
@@ -95,10 +100,9 @@ export function ChatInput({ onSend, disabled, placeholder }: ChatInputProps) {
               onClick={handleSubmit}
               disabled={!value.trim() || disabled}
               size="icon"
-              data-testid="button-submit"
               className={cn(
                 "h-9 w-9 md:h-10 md:w-10 rounded-xl transition-all duration-300",
-                value.trim() 
+                value.trim() && !disabled
                   ? "bg-primary text-primary-foreground shadow-lg shadow-primary/25 scale-100" 
                   : "bg-muted text-muted-foreground scale-90 opacity-50"
               )}
@@ -111,3 +115,47 @@ export function ChatInput({ onSend, disabled, placeholder }: ChatInputProps) {
     </div>
   );
 }
+
+2. Mobile Viewport Fix (client/src/pages/council.tsx)
+On mobile, h-screen can sometimes include the browser address bar, pushing your input box off-screen or making it jumpy.
+Update the <main> tag class to use h-[100dvh] (Dynamic Viewport Height).
+// ... imports
+
+export default function CouncilPage() {
+  // ... hook logic ...
+
+  return (
+    <SidebarProvider>
+      <div className="flex min-h-screen w-full bg-background text-foreground font-sans">
+        
+        <Sidebar>
+           {/* ... sidebar content ... */}
+        </Sidebar>
+
+        {/* FIX: Changed h-screen to h-[100dvh] for mobile browsers */}
+        <main className="flex-1 relative flex flex-col h-[100dvh] overflow-hidden">
+          
+          <header className="flex-none flex items-center justify-between p-4 border-b border-border/40 bg-background/50 backdrop-blur-md z-10">
+             {/* ... header content ... */}
+          </header>
+
+          <div className="flex-1 overflow-y-auto scroll-smooth">
+             {/* ... content ... */}
+          </div>
+
+          <div className="flex-none p-4 md:p-6 bg-gradient-to-t from-background via-background/95 to-transparent z-20 pb-6 md:pb-6">
+            <ChatInput 
+              onSend={startSimulation} 
+              // Ensure it's explicitly enabled during consensus
+              disabled={status === "thinking" || status === "judging"} 
+              placeholder={status === "consensus" ? "Ask a follow-up question..." : "Present your dilemma..."}
+            />
+            {/* ... status text ... */}
+          </div>
+
+        </main>
+      </div>
+    </SidebarProvider>
+  );
+}
+
